@@ -1,0 +1,12 @@
+﻿node_modules
+.env
+.env.*
+.DS_Store
+dist
+coverage
+apps/web/node_modules
+apps/mobile/node_modules
+apps/server/node_modules
+.expo
+npm-debug.log*
+apps/server/auth-data.json

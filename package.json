@@ -1,0 +1,19 @@
+{
+  "name": "pepsi-pos-platform",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w apps/server\" \"npm run dev -w apps/web\" \"npm run dev -w apps/mobile\"",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:server": "npm run dev -w apps/server",
+    "dev:mobile": "npm run dev -w apps/mobile",
+    "build": "npm run build -w apps/web",
+    "lint": "npm run lint -ws --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
