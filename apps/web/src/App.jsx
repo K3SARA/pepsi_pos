@@ -6,6 +6,7 @@ import {
   createCustomer,
   createProduct,
   createStaff,
+  deleteSale,
   deleteProduct,
   fetchDashboard,
   fetchMe,
@@ -18,6 +19,7 @@ import {
   patchProduct,
   setAuthCallbacks,
   setAuthSession,
+  submitDeliveryAdjustment,
   submitReturn,
   submitSale,
   updateCustomer,
@@ -77,6 +79,75 @@ const productSalePrice = (product) => Number(product?.billingPrice ?? product?.p
 const lineBasePrice = (line) => Number(line?.basePrice ?? line?.price ?? 0);
 const lineItemDiscount = (line) => Number(line?.itemDiscount || 0);
 const lineFinalPrice = (line) => Math.max(0, lineBasePrice(line) - Math.max(0, lineItemDiscount(line)));
+
+const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCustomerName = "", onPopupBlocked = () => {} }) => {
+  if (typeof window === "undefined" || !sale) return;
+  const toMoney = (value) => Number(value || 0).toFixed(2);
+  const saleDate = new Date(sale?.createdAt || Date.now());
+  const dateLabel = Number.isNaN(saleDate.getTime())
+    ? ""
+    : `${String(saleDate.getDate()).padStart(2, "0")}/${String(saleDate.getMonth() + 1).padStart(2, "0")}/${saleDate.getFullYear()}`;
+
+  const pickedCustomer = String(sale?.customerName || fallbackCustomerName || "Walk-in").trim() || "Walk-in";
+  const customer = (customers || []).find(
+    (row) => String(row?.name || "").trim().toLowerCase() === pickedCustomer.toLowerCase()
+  );
+
+  const baseLines = Array.isArray(sale?.lines) ? sale.lines : [];
+  const lines = baseLines.slice(0, 12).map((line) => {
+    const qty = Math.max(0, Number(line?.quantity || 0));
+    const product = (products || []).find((p) => p.id === line?.productId);
+    const billingPrice = Number(line?.basePrice ?? line?.price ?? product?.billingPrice ?? product?.price ?? 0);
+    const itemDiscount = Math.max(0, Number(line?.itemDiscount || 0));
+    const netUnit = Math.max(0, Number(line?.price ?? (billingPrice - itemDiscount)));
+    const sku = line?.sku || product?.sku || "";
+    return { sku, qty, billingPrice, itemDiscount, total: netUnit * qty };
+  });
+
+  const minRows = 8;
+  const rowsHtml = [...lines, ...Array.from({ length: Math.max(0, minRows - lines.length) }).map(() => null)]
+    .map((line) => {
+      if (!line) return "<tr><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>";
+      return `<tr><td>${escapeHtml(line.sku)}</td><td>${line.qty}</td><td>${toMoney(line.billingPrice)}</td><td>${toMoney(line.itemDiscount)}</td><td>${toMoney(line.total)}</td></tr>`;
+    })
+    .join("");
+
+  const printWindow = window.open("", "_blank", "width=1000,height=1300");
+  if (!printWindow) {
+    onPopupBlocked();
+    return;
+  }
+
+  const receiptHtml = `<!doctype html><html><head><meta charset="utf-8" /><title>Receipt #${escapeHtml(sale.id)}</title><style>
+@page { size: A4 portrait; margin: 10mm; } body { margin: 0; background: #fff; font-family: "Segoe UI", Arial, sans-serif; color: #111; }
+.sheet { width: 100%; max-width: 190mm; margin: 0 auto; padding: 4mm; } .header { background: #dfe1e4; border: 1px solid #ced2d8; padding: 10px 12px; display: grid; grid-template-columns: 130px 1fr; gap: 14px; align-items: center; }
+.logo-wrap { display: grid; justify-items: center; gap: 4px; } .logo-wrap img { width: 100px; height: 100px; object-fit: contain; }
+.brand-title { text-align: center; font-weight: 900; font-size: 26px; line-height: 1.05; letter-spacing: 0.4px; text-transform: uppercase; }
+.brand-sub { margin: 10px auto 0; width: fit-content; background: #fff; border-radius: 14px; padding: 8px 20px; font-size: 22px; font-weight: 700; }
+.meta { margin-top: 12px; border: 1px solid #1f2937; border-radius: 16px; padding: 8px 10px; display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: center; }
+.meta-box { border: 1px solid #1f2937; height: 90px; } .meta-grid { display: grid; grid-template-columns: 1fr auto; gap: 8px 24px; font-size: 18px; }
+.dots { border-bottom: 1px dotted #222; min-width: 230px; display: inline-block; margin-left: 5px; } table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
+th, td { border: 1px solid #111; padding: 4px 6px; text-align: left; height: 26px; } th { background: #d9e0ea; font-size: 16px; font-weight: 800; text-transform: uppercase; }
+th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { text-align: center; }
+.totals-grid { margin-top: 14px; display: grid; grid-template-columns: 1fr 1.1fr; gap: 14px; } .totals-box, .summary-box { border: 1px solid #5b8de0; min-height: 92px; padding: 10px 12px; font-size: 18px; }
+.summary-box { background: #d9e0ea; border-color: #c8d0dc; } .summary-box strong { font-size: 24px; } .notes { margin-top: 16px; font-size: 18px; font-weight: 600; line-height: 1.45; }
+.notes li { margin-bottom: 3px; } .signatures { margin-top: 70px; display: grid; grid-template-columns: 1fr 1fr; gap: 30px; text-align: center; font-size: 18px; }
+.sign-line { margin-bottom: 8px; letter-spacing: 2px; } .powered { text-align: center; margin-top: 80px; font-size: 20px; }
+  </style></head><body><div class="sheet">
+<div class="header"><div class="logo-wrap"><img src="/pepsi-logo.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
+<div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(customer?.phone || "-")}</span></div></div></div>
+<table><thead><tr><th>Item Code</th><th>Qty</th><th>Billing Price</th><th>Item Discount</th><th>Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+<div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(sale?.total)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div><div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div></div></div>
+<ul class="notes"><li>Return or exchange only with this receipt</li><li>Credit Payment for all goods shall be made No later than 14 days</li></ul>
+<div class="signatures"><div><div class="sign-line">.......................................</div><div>Customer Signature</div><div>Rubber Stamp</div></div><div><div class="sign-line">.......................................</div><div>P.S.R Signature</div></div></div>
+<div class="powered">Powered By J&amp;Co.</div></div></body></html>`;
+
+  printWindow.document.open();
+  printWindow.document.write(receiptHtml);
+  printWindow.document.close();
+  printWindow.focus();
+  setTimeout(() => printWindow.print(), 250);
+};
 
 const LoginScreen = ({ onLogin, error }) => {
   const [username, setUsername] = useState("");
@@ -440,7 +511,7 @@ const CashierView = ({
 
   return (
     <>
-      {message ? <p className="notice">{message}</p> : null}
+      {message && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(message)) ? <p className="notice">{message}</p> : null}
       <div className="cashier-tabs">
         <button type="button" className={cashierPage === "billing" ? "active" : ""} onClick={() => setCashierPage("billing")}>Billing</button>
         <button type="button" className={cashierPage === "returns" ? "active" : ""} onClick={() => setCashierPage("returns")}>Returns</button>
@@ -783,13 +854,29 @@ const CashierView = ({
   );
 };
 
-const AdminView = ({ state, dashboard, message }) => {
+const AdminView = ({ state, dashboard, message, onError }) => {
   const [showLowStock, setShowLowStock] = useState(false);
   const [selectedRep, setSelectedRep] = useState("");
+  const [chartDateFrom, setChartDateFrom] = useState("");
+  const [chartDateTo, setChartDateTo] = useState("");
   const [repDateFrom, setRepDateFrom] = useState("");
   const [repDateTo, setRepDateTo] = useState("");
   const [itemReportLorry, setItemReportLorry] = useState("all");
-  const [activePage, setActivePage] = useState("reports");
+  const [itemDateFrom, setItemDateFrom] = useState("");
+  const [itemDateTo, setItemDateTo] = useState("");
+  const [salesDateFrom, setSalesDateFrom] = useState("");
+  const [salesDateTo, setSalesDateTo] = useState("");
+  const [loadingDateFrom, setLoadingDateFrom] = useState("");
+  const [loadingDateTo, setLoadingDateTo] = useState("");
+  const [customerReportSearch, setCustomerReportSearch] = useState("");
+  const [customerPanelSearch, setCustomerPanelSearch] = useState("");
+  const [stockPanelSearch, setStockPanelSearch] = useState("");
+  const [deliveryLorry, setDeliveryLorry] = useState("all");
+  const [deliveryDateFrom, setDeliveryDateFrom] = useState("");
+  const [deliveryDateTo, setDeliveryDateTo] = useState("");
+  const [deliveryReportDateFrom, setDeliveryReportDateFrom] = useState("");
+  const [deliveryReportDateTo, setDeliveryReportDateTo] = useState("");
+  const [activePage, setActivePage] = useState("dashboard");
   const [notice, setNotice] = useState("");
 
   const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "" });
@@ -804,7 +891,33 @@ const AdminView = ({ state, dashboard, message }) => {
   const [showStaffForm, setShowStaffForm] = useState(false);
   const [showStockForm, setShowStockForm] = useState(false);
   const [deletingProduct, setDeletingProduct] = useState(false);
+  const [deletingSaleId, setDeletingSaleId] = useState("");
+  const [editingAdminSaleId, setEditingAdminSaleId] = useState("");
+  const [adminSaleEditLines, setAdminSaleEditLines] = useState([]);
+  const [adminSaleEditError, setAdminSaleEditError] = useState("");
+  const [savingAdminSaleEdit, setSavingAdminSaleEdit] = useState(false);
+  const [viewSaleId, setViewSaleId] = useState("");
+  const [deliverySaleId, setDeliverySaleId] = useState("");
+  const [deliveryDraft, setDeliveryDraft] = useState({});
+  const [deliveryError, setDeliveryError] = useState("");
+  const [savingDelivery, setSavingDelivery] = useState(false);
   const [tableSort, setTableSort] = useState({});
+
+  useEffect(() => {
+    if (!notice) return;
+    const isErrorNotice = /(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds|no\s.+to\sedit)/i.test(String(notice));
+    if (!isErrorNotice) return;
+    onError?.(notice);
+    setNotice("");
+  }, [notice, onError]);
+
+  const inDateRange = (iso, from, to) => {
+    const day = String(iso || "").slice(0, 10);
+    if (!day) return false;
+    if (from && day < from) return false;
+    if (to && day > to) return false;
+    return true;
+  };
 
   const toggleSort = (table, key) => {
     setTableSort((current) => {
@@ -838,17 +951,30 @@ const AdminView = ({ state, dashboard, message }) => {
 
   const chartData = useMemo(() => {
     const base = [];
-    const now = new Date();
-    for (let i = 7; i >= 0; i -= 1) {
-      const d = new Date(now);
-      d.setDate(now.getDate() - i);
-      const key = d.toISOString().slice(0, 10);
-      const short = d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-      const count = state.sales.filter((sale) => sale.createdAt.slice(0, 10) === key).length;
-      base.push({ key, short, count });
+    const today = new Date();
+    const endDate = chartDateTo ? new Date(`${chartDateTo}T00:00:00`) : today;
+    const startDate = chartDateFrom
+      ? new Date(`${chartDateFrom}T00:00:00`)
+      : (() => {
+          const d = new Date(endDate);
+          d.setDate(endDate.getDate() - 7);
+          return d;
+        })();
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime()) || startDate > endDate) return [];
+    const cursor = new Date(startDate);
+    let guard = 0;
+    while (cursor <= endDate && guard < 62) {
+      const key = cursor.toISOString().slice(0, 10);
+      const short = cursor.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      const daySales = state.sales.filter((sale) => String(sale.createdAt || "").slice(0, 10) === key);
+      const count = daySales.length;
+      const revenue = daySales.reduce((acc, sale) => acc + Number(sale.total || 0), 0);
+      base.push({ key, short, count, revenue: Number(revenue.toFixed(2)) });
+      cursor.setDate(cursor.getDate() + 1);
+      guard += 1;
     }
     return base;
-  }, [state.sales]);
+  }, [state.sales, chartDateFrom, chartDateTo]);
 
   const maxCount = Math.max(1, ...chartData.map((item) => item.count));
   const repChartData = useMemo(() => {
@@ -883,10 +1009,20 @@ const AdminView = ({ state, dashboard, message }) => {
     ]));
   }, [state.products]);
 
+  const reportSales = useMemo(
+    () => (state.sales || []).filter((sale) => inDateRange(sale.createdAt, salesDateFrom, salesDateTo)),
+    [state.sales, salesDateFrom, salesDateTo]
+  );
+
+  const itemReportSales = useMemo(
+    () => (state.sales || []).filter((sale) => inDateRange(sale.createdAt, itemDateFrom, itemDateTo)),
+    [state.sales, itemDateFrom, itemDateTo]
+  );
+
   const itemWiseRows = useMemo(() => {
     const salesSource = itemReportLorry === "all"
-      ? state.sales
-      : state.sales.filter((sale) => sale.lorry === itemReportLorry);
+      ? itemReportSales
+      : itemReportSales.filter((sale) => sale.lorry === itemReportLorry);
     const map = new Map();
     for (const sale of salesSource) {
       for (const line of (sale.lines || [])) {
@@ -900,19 +1036,32 @@ const AdminView = ({ state, dashboard, message }) => {
       }
     }
     return [...map.values()].sort((a, b) => b.qty - a.qty);
-  }, [itemReportLorry, state.sales, productInfoById]);
+  }, [itemReportLorry, itemReportSales, productInfoById]);
 
   const loadingRowsByLorry = useMemo(() => {
     const buildRows = (lorryName) => {
       const map = new Map();
       for (const sale of state.sales) {
+        if (!inDateRange(sale.createdAt, loadingDateFrom, loadingDateTo)) continue;
         if (sale.lorry !== lorryName) continue;
         for (const line of (sale.lines || [])) {
           const key = line.productId || line.name;
           const info = productInfoById.get(line.productId) || { name: line.name || "Unknown Item", sku: "-", size: "", category: "" };
-          const row = map.get(key) || { key, name: info.name, sku: info.sku, size: info.size || "", category: info.category || "", qty: 0 };
-          row.qty += Number(line.quantity || 0);
+          const row = map.get(key) || { key, name: info.name, sku: info.sku, size: info.size || "", category: info.category || "", qty: 0, value: 0 };
+          const qty = Number(line.quantity || 0);
+          const unit = Number(line.price || 0);
+          row.qty += qty;
+          row.value += qty * unit;
           map.set(key, row);
+        }
+      }
+      const returnedByProduct = new Map();
+      for (const ret of (state.returns || [])) {
+        const retSale = (state.sales || []).find((s) => String(s.id) === String(ret.saleId));
+        if (!retSale || retSale.lorry !== lorryName) continue;
+        if (!inDateRange(ret.createdAt, loadingDateFrom, loadingDateTo)) continue;
+        for (const line of (ret.lines || [])) {
+          returnedByProduct.set(line.productId, (returnedByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
         }
       }
       return [...map.values()]
@@ -920,29 +1069,34 @@ const AdminView = ({ state, dashboard, message }) => {
           const bundleSize = getBundleSize(row);
           const bundles = bundleSize ? Math.floor(row.qty / bundleSize) : 0;
           const balance = bundleSize ? row.qty % bundleSize : row.qty;
-          return { ...row, bundleSize, bundles, balance };
+          const returned = Number(returnedByProduct.get(row.key) || 0);
+          const deliveredQty = Math.max(0, row.qty - returned);
+          const deliveredValue = row.qty > 0 ? (row.value * (deliveredQty / row.qty)) : 0;
+          return { ...row, bundleSize, bundles, balance, orderedQty: row.qty, orderedValue: row.value, deliveredQty, deliveredValue };
         })
-        .sort((a, b) => b.qty - a.qty);
+        .sort((a, b) => b.orderedQty - a.orderedQty);
     };
 
     return {
       "Lorry A": buildRows("Lorry A"),
       "Lorry B": buildRows("Lorry B")
     };
-  }, [state.sales, productInfoById]);
+  }, [state.sales, state.returns, loadingDateFrom, loadingDateTo, productInfoById]);
 
   const salesWiseRows = useMemo(() => {
-    return state.sales.map((sale) => ({
+    return reportSales.map((sale) => ({
       id: sale.id,
       when: new Date(sale.createdAt).toLocaleString(),
+      whenTs: new Date(sale.createdAt).getTime(),
       rep: sale.cashier || "Unknown",
-      total: Number(sale.total || 0)
+      total: Number(sale.total || 0),
+      raw: sale
     }));
-  }, [state.sales]);
+  }, [reportSales]);
 
   const customerWiseRows = useMemo(() => {
     const map = new Map();
-    for (const sale of state.sales) {
+    for (const sale of reportSales) {
       const key = sale.customerName || "Walk-in";
       const current = map.get(key) || { name: key, orders: 0, spent: 0, lastAt: "" };
       current.orders += 1;
@@ -953,7 +1107,7 @@ const AdminView = ({ state, dashboard, message }) => {
       map.set(key, current);
     }
     return [...map.values()].sort((a, b) => b.spent - a.spent);
-  }, [state.sales]);
+  }, [reportSales]);
 
   const customerRows = useMemo(() => {
     const map = new Map();
@@ -975,28 +1129,48 @@ const AdminView = ({ state, dashboard, message }) => {
     }
     return [...map.values()].sort((a, b) => b.spent - a.spent);
   }, [state.sales, state.customers]);
+  const filteredCustomerRows = useMemo(() => {
+    const term = customerPanelSearch.trim().toLowerCase();
+    if (!term) return customerRows;
+    return customerRows.filter((row) =>
+      String(row.name || "").toLowerCase().includes(term)
+      || String(row.phone || "").toLowerCase().includes(term)
+      || String(row.address || "").toLowerCase().includes(term)
+    );
+  }, [customerRows, customerPanelSearch]);
   const sortedCustomerRows = useMemo(
-    () => sortRows(customerRows, "customers", "name", {
+    () => sortRows(filteredCustomerRows, "customers", "name", {
       name: (row) => row.name,
       phone: (row) => row.phone || "",
       orders: (row) => Number(row.orders || 0),
       spent: (row) => Number(row.spent || 0),
       outstanding: (row) => Number(row.outstanding || 0)
     }),
-    [customerRows, tableSort]
+    [filteredCustomerRows, tableSort]
   );
 
   const stockRows = useMemo(() => {
     return [...state.products].sort((a, b) => a.stock - b.stock);
   }, [state.products]);
+  const filteredStockRows = useMemo(() => {
+    const term = stockPanelSearch.trim().toLowerCase();
+    if (!term) return stockRows;
+    return stockRows.filter((row) =>
+      String(row.name || "").toLowerCase().includes(term)
+      || String(row.sku || "").toLowerCase().includes(term)
+      || String(row.size || "").toLowerCase().includes(term)
+    );
+  }, [stockRows, stockPanelSearch]);
   const sortedStockRows = useMemo(
-    () => sortRows(stockRows, "stock", "name", {
+    () => sortRows(filteredStockRows, "stock", "name", {
       name: (row) => row.name,
       size: (row) => row.size || "",
       sku: (row) => row.sku,
+      billingPrice: (row) => Number(row.billingPrice ?? row.price ?? 0),
+      mrp: (row) => Number(row.mrp ?? row.price ?? 0),
       stock: (row) => Number(row.stock || 0)
     }),
-    [stockRows, tableSort]
+    [filteredStockRows, tableSort]
   );
 
   const adminReturnRows = useMemo(() => {
@@ -1070,42 +1244,255 @@ const AdminView = ({ state, dashboard, message }) => {
   const sortedSalesWiseRows = useMemo(
     () => sortRows(salesWiseRows, "salesWise", "when", {
       id: (row) => Number(row.id || 0),
-      when: (row) => new Date(row.when).getTime(),
+      when: (row) => Number(row.whenTs || 0),
       rep: (row) => row.rep || "",
       total: (row) => Number(row.total || 0)
     }),
     [salesWiseRows, tableSort]
   );
 
+  const filteredCustomerWiseRows = useMemo(() => {
+    const term = customerReportSearch.trim().toLowerCase();
+    if (!term) return customerWiseRows;
+    return customerWiseRows.filter((row) => String(row.name || "").toLowerCase().includes(term));
+  }, [customerWiseRows, customerReportSearch]);
   const sortedCustomerWiseRows = useMemo(
-    () => sortRows(customerWiseRows, "customerWise", "spent", {
+    () => sortRows(filteredCustomerWiseRows, "customerWise", "spent", {
       name: (row) => row.name,
       orders: (row) => Number(row.orders || 0),
       spent: (row) => Number(row.spent || 0),
       lastAt: (row) => (row.lastAt ? new Date(row.lastAt).getTime() : 0)
     }),
-    [customerWiseRows, tableSort]
+    [filteredCustomerWiseRows, tableSort]
   );
 
   const sortedLoadingA = useMemo(
-    () => sortRows(loadingRowsByLorry["Lorry A"], "loadingA", "qty", {
+    () => sortRows(loadingRowsByLorry["Lorry A"], "loadingA", "orderedQty", {
       name: (row) => row.name,
-      qty: (row) => Number(row.qty || 0),
-      bundles: (row) => Number(row.bundles || 0),
-      balance: (row) => Number(row.balance || 0)
+      orderedQty: (row) => Number(row.orderedQty || 0),
+      orderedValue: (row) => Number(row.orderedValue || 0),
+      deliveredQty: (row) => Number(row.deliveredQty || 0),
+      deliveredValue: (row) => Number(row.deliveredValue || 0)
     }),
     [loadingRowsByLorry, tableSort]
   );
 
   const sortedLoadingB = useMemo(
-    () => sortRows(loadingRowsByLorry["Lorry B"], "loadingB", "qty", {
+    () => sortRows(loadingRowsByLorry["Lorry B"], "loadingB", "orderedQty", {
       name: (row) => row.name,
-      qty: (row) => Number(row.qty || 0),
-      bundles: (row) => Number(row.bundles || 0),
-      balance: (row) => Number(row.balance || 0)
+      orderedQty: (row) => Number(row.orderedQty || 0),
+      orderedValue: (row) => Number(row.orderedValue || 0),
+      deliveredQty: (row) => Number(row.deliveredQty || 0),
+      deliveredValue: (row) => Number(row.deliveredValue || 0)
     }),
     [loadingRowsByLorry, tableSort]
   );
+
+  const salesRangeTotal = useMemo(
+    () => Number(sortedSalesWiseRows.reduce((acc, row) => acc + Number(row.total || 0), 0).toFixed(2)),
+    [sortedSalesWiseRows]
+  );
+
+  const loadingSummaryA = useMemo(() => {
+    const rows = loadingRowsByLorry["Lorry A"] || [];
+    return {
+      orderedQty: rows.reduce((acc, row) => acc + Number(row.orderedQty || 0), 0),
+      orderedValue: rows.reduce((acc, row) => acc + Number(row.orderedValue || 0), 0),
+      deliveredQty: rows.reduce((acc, row) => acc + Number(row.deliveredQty || 0), 0),
+      deliveredValue: rows.reduce((acc, row) => acc + Number(row.deliveredValue || 0), 0)
+    };
+  }, [loadingRowsByLorry]);
+
+  const loadingSummaryB = useMemo(() => {
+    const rows = loadingRowsByLorry["Lorry B"] || [];
+    return {
+      orderedQty: rows.reduce((acc, row) => acc + Number(row.orderedQty || 0), 0),
+      orderedValue: rows.reduce((acc, row) => acc + Number(row.orderedValue || 0), 0),
+      deliveredQty: rows.reduce((acc, row) => acc + Number(row.deliveredQty || 0), 0),
+      deliveredValue: rows.reduce((acc, row) => acc + Number(row.deliveredValue || 0), 0)
+    };
+  }, [loadingRowsByLorry]);
+
+  const deliveryRows = useMemo(() => {
+    const rows = (state.sales || [])
+      .filter((sale) => inDateRange(sale.createdAt, deliveryDateFrom, deliveryDateTo))
+      .filter((sale) => (deliveryLorry === "all" ? true : sale.lorry === deliveryLorry))
+      .map((sale) => {
+        const undeliveredQty = (sale.deliveryAdjustments || []).reduce(
+          (acc, adj) => acc + (adj.lines || []).reduce((lineAcc, line) => lineAcc + Number(line.quantity || 0), 0),
+          0
+        );
+        const soldQty = (sale.lines || []).reduce((acc, line) => acc + Number(line.quantity || 0), 0);
+        return {
+          sale,
+          id: sale.id,
+          when: new Date(sale.createdAt).toLocaleString(),
+          rep: sale.cashier || "-",
+          lorry: sale.lorry || "-",
+          total: Number(sale.total || 0),
+          soldQty,
+          undeliveredQty,
+          confirmed: Boolean(sale.deliveryConfirmedAt)
+        };
+      });
+    return rows.sort((a, b) => new Date(b.sale.createdAt).getTime() - new Date(a.sale.createdAt).getTime());
+  }, [state.sales, deliveryDateFrom, deliveryDateTo, deliveryLorry]);
+
+  const deliveryReportSales = useMemo(
+    () => (state.sales || [])
+      .filter((sale) => inDateRange(sale.createdAt, deliveryReportDateFrom, deliveryReportDateTo))
+      .filter((sale) => (deliveryLorry === "all" ? true : sale.lorry === deliveryLorry)),
+    [state.sales, deliveryReportDateFrom, deliveryReportDateTo, deliveryLorry]
+  );
+
+  const deliveredItemRows = useMemo(() => {
+    const sales = deliveryReportSales.filter((sale) => Boolean(sale.deliveryConfirmedAt));
+    const map = new Map();
+    for (const sale of sales) {
+      const undeliveredByProduct = new Map();
+      for (const adj of (sale.deliveryAdjustments || [])) {
+        for (const line of (adj.lines || [])) {
+          undeliveredByProduct.set(line.productId, (undeliveredByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
+        }
+      }
+      for (const line of (sale.lines || [])) {
+        const soldQty = Number(line.quantity || 0);
+        const undeliveredQty = Number(undeliveredByProduct.get(line.productId) || 0);
+        const deliveredQty = Math.max(0, soldQty - undeliveredQty);
+        if (deliveredQty <= 0) continue;
+        const unitPrice = Number(line.price || 0);
+        const key = line.productId || line.name;
+        const current = map.get(key) || {
+          key,
+          item: line.name || productInfoById.get(line.productId)?.name || "Unknown",
+          sku: productInfoById.get(line.productId)?.sku || "-",
+          qty: 0,
+          value: 0
+        };
+        current.qty += deliveredQty;
+        current.value += deliveredQty * unitPrice;
+        map.set(key, current);
+      }
+    }
+    return [...map.values()].sort((a, b) => b.qty - a.qty);
+  }, [deliveryReportSales, productInfoById]);
+
+  const deliveredTotals = useMemo(() => ({
+    qty: deliveredItemRows.reduce((acc, row) => acc + Number(row.qty || 0), 0),
+    value: Number(deliveredItemRows.reduce((acc, row) => acc + Number(row.value || 0), 0).toFixed(2))
+  }), [deliveredItemRows]);
+
+  const soldTotals = useMemo(() => ({
+    qty: deliveryReportSales.reduce(
+      (acc, sale) => acc + (sale.lines || []).reduce((lineAcc, line) => lineAcc + Number(line.quantity || 0), 0),
+      0
+    ),
+    value: Number(deliveryReportSales.reduce((acc, sale) => acc + Number(sale.total || 0), 0).toFixed(2))
+  }), [deliveryReportSales]);
+
+  const viewedSale = useMemo(
+    () => (state.sales || []).find((sale) => String(sale.id) === String(viewSaleId)) || null,
+    [state.sales, viewSaleId]
+  );
+
+  const deliverySale = useMemo(
+    () => (state.sales || []).find((sale) => String(sale.id) === String(deliverySaleId)) || null,
+    [state.sales, deliverySaleId]
+  );
+
+  const openAdminSaleEdit = (sale) => {
+    setEditingAdminSaleId(sale.id);
+    setAdminSaleEditLines((sale.lines || []).map((line) => ({
+      productId: line.productId,
+      name: line.name,
+      quantity: Number(line.quantity || 0)
+    })));
+    setAdminSaleEditError("");
+  };
+
+  const saveAdminSaleEdit = async () => {
+    try {
+      const lines = adminSaleEditLines
+        .map((line) => ({ ...line, quantity: Number(line.quantity || 0) }))
+        .filter((line) => Number.isFinite(line.quantity) && line.quantity > 0);
+      if (!editingAdminSaleId || !lines.length) {
+        setAdminSaleEditError("Keep at least one item in bill.");
+        return;
+      }
+      setSavingAdminSaleEdit(true);
+      setAdminSaleEditError("");
+      await patchSale(editingAdminSaleId, { lines });
+      setEditingAdminSaleId("");
+      setAdminSaleEditLines([]);
+      setNotice("Sale updated.");
+    } catch (error) {
+      setAdminSaleEditError(error.message);
+    } finally {
+      setSavingAdminSaleEdit(false);
+    }
+  };
+
+  const deleteAdminSale = async (sale) => {
+    try {
+      const ok = window.confirm(`Delete sale #${sale.id}? This will restore stock and remove linked returns.`);
+      if (!ok) return;
+      setDeletingSaleId(String(sale.id));
+      await deleteSale(sale.id);
+      setNotice(`Sale #${sale.id} deleted.`);
+      if (editingAdminSaleId && String(editingAdminSaleId) === String(sale.id)) {
+        setEditingAdminSaleId("");
+        setAdminSaleEditLines([]);
+      }
+    } catch (error) {
+      setNotice(error.message);
+    } finally {
+      setDeletingSaleId("");
+    }
+  };
+
+  const printAdminSaleReceipt = (sale) => {
+    openSaleReceiptPrint({
+      sale,
+      customers: state.customers || [],
+      products: state.products || [],
+      onPopupBlocked: () => setNotice("Allow popups to print receipt.")
+    });
+  };
+
+  const openDeliveryModal = (sale) => {
+    setDeliverySaleId(String(sale.id));
+    setDeliveryDraft({});
+    setDeliveryError("");
+  };
+
+  const onDeliveryDraftChange = (productId, value) => {
+    setDeliveryDraft((current) => ({ ...current, [productId]: value }));
+  };
+
+  const saveDeliveryAdjust = async () => {
+    try {
+      if (!deliverySale) {
+        setDeliveryError("Sale not found.");
+        return;
+      }
+      const lines = (deliverySale.lines || [])
+        .map((line) => ({
+          productId: line.productId,
+          quantity: Number(deliveryDraft[line.productId] || 0)
+        }))
+        .filter((line) => Number.isFinite(line.quantity) && line.quantity > 0);
+      setSavingDelivery(true);
+      setDeliveryError("");
+      await submitDeliveryAdjustment(deliverySale.id, { lines, markConfirmed: true });
+      setDeliverySaleId("");
+      setDeliveryDraft({});
+      setNotice(`Delivery confirmed for sale #${deliverySale.id}.`);
+    } catch (error) {
+      setDeliveryError(error.message);
+    } finally {
+      setSavingDelivery(false);
+    }
+  };
 
   const openCustomerAdd = () => {
     setCustomerForm({ id: "", name: "", phone: "", address: "" });
@@ -1392,17 +1779,19 @@ const AdminView = ({ state, dashboard, message }) => {
   };
 
   const navItems = [
+    { id: "dashboard", label: "Dashboard" },
     { id: "customers", label: "Customers" },
     { id: "stock", label: "Stock" },
     { id: "staff", label: "Staff" },
+    { id: "deliveries", label: "Deliveries" },
     { id: "reports", label: "Reports" },
     { id: "loadings", label: "Loadings" }
   ];
 
   return (
     <>
-      {message ? <p className="notice">{message}</p> : null}
-      {notice ? <p className="notice">{notice}</p> : null}
+      {message && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(message)) ? <p className="notice">{message}</p> : null}
+      {notice && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(notice)) ? <p className="notice">{notice}</p> : null}
       <main className="admin-shell">
         <aside className="admin-sidebar">
           {navItems.map((item) => (
@@ -1425,6 +1814,11 @@ const AdminView = ({ state, dashboard, message }) => {
                 <button type="button" onClick={openCustomerAdd}>Add Customer</button>
                 <button type="button" onClick={openCustomerEdit}>Edit Customer</button>
               </div>
+              <input
+                value={customerPanelSearch}
+                onChange={(e) => setCustomerPanelSearch(e.target.value)}
+                placeholder="Search customer / phone / address"
+              />
               {showCustomerForm ? (
                 <div className="admin-inline-form">
                   <input value={customerForm.name} onChange={(e) => setCustomerForm((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name" />
@@ -1534,11 +1928,18 @@ const AdminView = ({ state, dashboard, message }) => {
                   />
                 </div>
               </div>
+              <input
+                value={stockPanelSearch}
+                onChange={(e) => setStockPanelSearch(e.target.value)}
+                placeholder="Search product / SKU / size"
+              />
               <div className="admin-table stock-table">
                 <header>
                   <button type="button" className="th-sort" onClick={() => toggleSort("stock", "name")}>Product{sortMark("stock", "name")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("stock", "size")}>Size{sortMark("stock", "size")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("stock", "sku")}>SKU{sortMark("stock", "sku")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "billingPrice")}>Billing Price{sortMark("stock", "billingPrice")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "mrp")}>MRP{sortMark("stock", "mrp")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("stock", "stock")}>Stock{sortMark("stock", "stock")}</button>
                   <span className="th-action">Action</span>
                 </header>
@@ -1547,6 +1948,8 @@ const AdminView = ({ state, dashboard, message }) => {
                     <span>{item.name}</span>
                     <span>{item.size || "-"}</span>
                     <span>{item.sku}</span>
+                    <span>{currency(item.billingPrice ?? item.price ?? 0)}</span>
+                    <span>{currency(item.mrp ?? item.price ?? 0)}</span>
                     <span className={item.stock <= 25 ? "low" : ""}>{item.stock}</span>
                     <span className="action-cell">
                       <button type="button" className="row-danger" onClick={() => deleteStockProductById(item)} disabled={deletingProduct}>
@@ -1617,7 +2020,105 @@ const AdminView = ({ state, dashboard, message }) => {
             </section>
           ) : null}
 
-          {activePage === "reports" ? (
+          {activePage === "deliveries" ? (
+            <section className="admin-mobile-section">
+              <h2>Deliveries</h2>
+              <div className="rep-date-filters">
+                <select value={deliveryLorry} onChange={(e) => setDeliveryLorry(e.target.value)}>
+                  <option value="all">All Lorries</option>
+                  <option value="Lorry A">Lorry A</option>
+                  <option value="Lorry B">Lorry B</option>
+                </select>
+                <label className="rep-date-field">
+                  <span>From</span>
+                  <input type="date" value={deliveryDateFrom} onChange={(e) => setDeliveryDateFrom(e.target.value)} />
+                </label>
+                <label className="rep-date-field">
+                  <span>To</span>
+                  <input type="date" value={deliveryDateTo} onChange={(e) => setDeliveryDateTo(e.target.value)} />
+                </label>
+              </div>
+              <div className="admin-table deliveries-table">
+                <header>
+                  <span>Sale ID</span>
+                  <span>Date/Time</span>
+                  <span>Rep</span>
+                  <span>Lorry</span>
+                  <span>Total</span>
+                  <span>Status</span>
+                  <span className="th-action">Action</span>
+                </header>
+                {deliveryRows.length ? deliveryRows.map((row) => (
+                  <article key={`d-${row.id}`}>
+                    <span>#{row.id}</span>
+                    <span className="delivery-cell-date">{row.when}</span>
+                    <span>{row.rep}</span>
+                    <span>{row.lorry}</span>
+                    <span>{currency(row.total)}</span>
+                    <span>
+                      <span className={row.confirmed ? "delivery-status confirmed" : "delivery-status pending"}>
+                        {row.confirmed ? "Confirmed" : "Pending"}
+                      </span>
+                    </span>
+                    <span className="action-cell">
+                      <button type="button" className="delivery-action-btn" onClick={() => openDeliveryModal(row.sale)}>
+                        {row.confirmed ? "Update" : "Confirm"}
+                      </button>
+                    </span>
+                  </article>
+                )) : <p>No delivery bills found for selected filters.</p>}
+              </div>
+              <div className="report-head" style={{ marginTop: "0.65rem" }}>
+                <h3>Delivered Items Report</h3>
+              </div>
+              <div className="rep-date-filters">
+                <label className="rep-date-field">
+                  <span>From</span>
+                  <input type="date" value={deliveryReportDateFrom} onChange={(e) => setDeliveryReportDateFrom(e.target.value)} />
+                </label>
+                <label className="rep-date-field">
+                  <span>To</span>
+                  <input type="date" value={deliveryReportDateTo} onChange={(e) => setDeliveryReportDateTo(e.target.value)} />
+                </label>
+              </div>
+              <div className="delivery-kpi-grid">
+                <article>
+                  <span>Sold Qty</span>
+                  <strong>{soldTotals.qty}</strong>
+                </article>
+                <article>
+                  <span>Sold Value</span>
+                  <strong>{currency(soldTotals.value)}</strong>
+                </article>
+                <article>
+                  <span>Delivered Qty</span>
+                  <strong>{deliveredTotals.qty}</strong>
+                </article>
+                <article>
+                  <span>Delivered Value</span>
+                  <strong>{currency(deliveredTotals.value)}</strong>
+                </article>
+              </div>
+              <div className="admin-table deliveries-report-table">
+                <header>
+                  <span>Item</span>
+                  <span>SKU</span>
+                  <span>Delivered Qty</span>
+                  <span>Delivered Value</span>
+                </header>
+                {deliveredItemRows.length ? deliveredItemRows.map((row) => (
+                  <article key={`dr-${row.key}`}>
+                    <span>{row.item}</span>
+                    <span>{row.sku}</span>
+                    <span>{row.qty}</span>
+                    <span>{currency(row.value)}</span>
+                  </article>
+                )) : <p>No delivered item records for selected filters.</p>}
+              </div>
+            </section>
+          ) : null}
+
+          {activePage === "dashboard" ? (
             <div className="admin-mobile">
               <section className="admin-mobile-section">
                 <h2>Admin Snapshot</h2>
@@ -1637,6 +2138,16 @@ const AdminView = ({ state, dashboard, message }) => {
 
               <section className="admin-mobile-section">
                 <h2>Sales Chart by Day</h2>
+                <div className="rep-date-filters">
+                  <label className="rep-date-field">
+                    <span>From</span>
+                    <input type="date" value={chartDateFrom} onChange={(e) => setChartDateFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To</span>
+                    <input type="date" value={chartDateTo} onChange={(e) => setChartDateTo(e.target.value)} />
+                  </label>
+                </div>
                 <div className="bar-chart">
                   {chartData.map((item) => (
                     <div key={item.key} className="bar-col">
@@ -1644,6 +2155,7 @@ const AdminView = ({ state, dashboard, message }) => {
                       <div className="bar-wrap">
                         <div className="bar" style={{ height: `${(item.count / maxCount) * 100}%` }} />
                       </div>
+                      <div className="bar-meta">{currency(item.revenue)}</div>
                       <div className="bar-label">{item.short}</div>
                     </div>
                   ))}
@@ -1688,7 +2200,11 @@ const AdminView = ({ state, dashboard, message }) => {
                   ))}
                 </div>
               </section>
+            </div>
+          ) : null}
 
+          {activePage === "reports" ? (
+            <div className="admin-mobile">
               <section className="admin-mobile-section">
                 <div className="report-head">
                   <h2>Item Wise Report</h2>
@@ -1697,6 +2213,16 @@ const AdminView = ({ state, dashboard, message }) => {
                     <option value="Lorry A">Lorry A</option>
                     <option value="Lorry B">Lorry B</option>
                   </select>
+                </div>
+                <div className="rep-date-filters">
+                  <label className="rep-date-field">
+                    <span>From</span>
+                    <input type="date" value={itemDateFrom} onChange={(e) => setItemDateFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To</span>
+                    <input type="date" value={itemDateTo} onChange={(e) => setItemDateTo(e.target.value)} />
+                  </label>
                 </div>
                 <div className="admin-table item-wise-table">
                   <header>
@@ -1720,12 +2246,24 @@ const AdminView = ({ state, dashboard, message }) => {
 
               <section className="admin-mobile-section">
                 <h2>Sales Wise Report</h2>
-                <div className="admin-table">
+                <div className="rep-date-filters">
+                  <label className="rep-date-field">
+                    <span>From</span>
+                    <input type="date" value={salesDateFrom} onChange={(e) => setSalesDateFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To</span>
+                    <input type="date" value={salesDateTo} onChange={(e) => setSalesDateTo(e.target.value)} />
+                  </label>
+                </div>
+                <p className="form-hint">Selected range total sale value: <strong>{currency(salesRangeTotal)}</strong></p>
+                <div className="admin-table sales-wise-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "id")}>Sale ID{sortMark("salesWise", "id")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "when")}>Date/Time{sortMark("salesWise", "when")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "rep")}>Rep{sortMark("salesWise", "rep")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "total")}>Total{sortMark("salesWise", "total")}</button>
+                    <span className="th-action">Actions</span>
                   </header>
                   {sortedSalesWiseRows.length ? sortedSalesWiseRows.slice(0, 50).map((row) => (
                     <article key={row.id}>
@@ -1733,6 +2271,13 @@ const AdminView = ({ state, dashboard, message }) => {
                       <span>{row.when}</span>
                       <span>{row.rep}</span>
                       <span>{currency(row.total)}</span>
+                      <span className="action-cell">
+                        <button type="button" className="ghost" onClick={() => setViewSaleId(String(row.id))}>View</button>
+                        <button type="button" className="ghost" onClick={() => openAdminSaleEdit(row.raw)}>Edit</button>
+                        <button type="button" className="row-danger" onClick={() => deleteAdminSale(row.raw)} disabled={deletingSaleId === String(row.id)}>
+                          {deletingSaleId === String(row.id) ? "Deleting..." : "Delete"}
+                        </button>
+                      </span>
                     </article>
                   )) : <p>No sales records yet.</p>}
                 </div>
@@ -1740,6 +2285,11 @@ const AdminView = ({ state, dashboard, message }) => {
 
               <section className="admin-mobile-section">
                 <h2>Customer Wise Report</h2>
+                <input
+                  value={customerReportSearch}
+                  onChange={(e) => setCustomerReportSearch(e.target.value)}
+                  placeholder="Search customer"
+                />
                 <div className="admin-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "name")}>Customer{sortMark("customerWise", "name")}</button>
@@ -1763,20 +2313,38 @@ const AdminView = ({ state, dashboard, message }) => {
           {activePage === "loadings" ? (
             <div className="admin-mobile">
               <section className="admin-mobile-section">
+                <h2>Loading Date Range</h2>
+                <div className="rep-date-filters">
+                  <label className="rep-date-field">
+                    <span>From</span>
+                    <input type="date" value={loadingDateFrom} onChange={(e) => setLoadingDateFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To</span>
+                    <input type="date" value={loadingDateTo} onChange={(e) => setLoadingDateTo(e.target.value)} />
+                  </label>
+                </div>
+              </section>
+              <section className="admin-mobile-section">
                 <h2>Lorry A Loading</h2>
-                <div className="admin-table">
+                <p className="form-hint">
+                  Ordered: {loadingSummaryA.orderedQty} / {currency(loadingSummaryA.orderedValue)} • Delivered: {loadingSummaryA.deliveredQty} / {currency(loadingSummaryA.deliveredValue)}
+                </p>
+                <div className="admin-table loading-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "name")}>Item{sortMark("loadingA", "name")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "qty")}>Qty{sortMark("loadingA", "qty")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "bundles")}>Bundles{sortMark("loadingA", "bundles")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "balance")}>Balance{sortMark("loadingA", "balance")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "orderedQty")}>Ordered Qty{sortMark("loadingA", "orderedQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "orderedValue")}>Ordered Value{sortMark("loadingA", "orderedValue")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "deliveredQty")}>Delivered Qty{sortMark("loadingA", "deliveredQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "deliveredValue")}>Delivered Value{sortMark("loadingA", "deliveredValue")}</button>
                   </header>
                   {sortedLoadingA.length ? sortedLoadingA.map((row) => (
                     <article key={`a-${row.key}`}>
                       <span>{row.name}</span>
-                      <span>{row.qty}</span>
-                      <span>{row.bundleSize ? row.bundles : "-"}</span>
-                      <span>{row.bundleSize ? row.balance : row.qty}</span>
+                      <span>{row.orderedQty}</span>
+                      <span>{currency(row.orderedValue)}</span>
+                      <span>{row.deliveredQty}</span>
+                      <span>{currency(row.deliveredValue)}</span>
                     </article>
                   )) : <p>No loading data for Lorry A.</p>}
                 </div>
@@ -1784,27 +2352,168 @@ const AdminView = ({ state, dashboard, message }) => {
 
               <section className="admin-mobile-section">
                 <h2>Lorry B Loading</h2>
-                <div className="admin-table">
+                <p className="form-hint">
+                  Ordered: {loadingSummaryB.orderedQty} / {currency(loadingSummaryB.orderedValue)} • Delivered: {loadingSummaryB.deliveredQty} / {currency(loadingSummaryB.deliveredValue)}
+                </p>
+                <div className="admin-table loading-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "name")}>Item{sortMark("loadingB", "name")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "qty")}>Qty{sortMark("loadingB", "qty")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "bundles")}>Bundles{sortMark("loadingB", "bundles")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "balance")}>Balance{sortMark("loadingB", "balance")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "orderedQty")}>Ordered Qty{sortMark("loadingB", "orderedQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "orderedValue")}>Ordered Value{sortMark("loadingB", "orderedValue")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "deliveredQty")}>Delivered Qty{sortMark("loadingB", "deliveredQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "deliveredValue")}>Delivered Value{sortMark("loadingB", "deliveredValue")}</button>
                   </header>
                   {sortedLoadingB.length ? sortedLoadingB.map((row) => (
                     <article key={`b-${row.key}`}>
                       <span>{row.name}</span>
-                      <span>{row.qty}</span>
-                      <span>{row.bundleSize ? row.bundles : "-"}</span>
-                      <span>{row.bundleSize ? row.balance : row.qty}</span>
+                      <span>{row.orderedQty}</span>
+                      <span>{currency(row.orderedValue)}</span>
+                      <span>{row.deliveredQty}</span>
+                      <span>{currency(row.deliveredValue)}</span>
                     </article>
                   )) : <p>No loading data for Lorry B.</p>}
                 </div>
               </section>
             </div>
-          ) : null}
+      ) : null}
         </section>
       </main>
+
+      {editingAdminSaleId ? (
+        <div className="low-stock-modal" onClick={() => { setEditingAdminSaleId(""); setAdminSaleEditLines([]); setAdminSaleEditError(""); }}>
+          <div className="low-stock-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Edit Sale #{editingAdminSaleId}</h3>
+              <button type="button" onClick={() => { setEditingAdminSaleId(""); setAdminSaleEditLines([]); setAdminSaleEditError(""); }}>Close</button>
+            </div>
+            <div className="admin-inline-form">
+              {adminSaleEditLines.map((line) => (
+                <div key={line.productId} className="stock-row">
+                  <span>{line.name}</span>
+                  <input type="number" min="1" value={line.quantity} onChange={(e) => setAdminSaleEditLines((current) => current.map((l) => (l.productId === line.productId ? { ...l, quantity: e.target.value } : l)))} />
+                  <button type="button" className="row-danger" onClick={() => setAdminSaleEditLines((current) => current.filter((l) => l.productId !== line.productId))}>Remove</button>
+                </div>
+              ))}
+              {adminSaleEditError ? <p className="form-hint">{adminSaleEditError}</p> : null}
+              <div>
+                <button type="button" onClick={saveAdminSaleEdit} disabled={savingAdminSaleEdit}>{savingAdminSaleEdit ? "Saving..." : "Save Edit"}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {viewedSale ? (
+        <div className="low-stock-modal" onClick={() => setViewSaleId("")}>
+          <div className="low-stock-modal-card receipt-preview-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Receipt #{viewedSale.id}</h3>
+              <div className="action-cell">
+                <button type="button" onClick={() => printAdminSaleReceipt(viewedSale)}>Print</button>
+                <button type="button" className="ghost" onClick={() => setViewSaleId("")}>Close</button>
+              </div>
+            </div>
+            <div className="receipt-preview">
+              <h4>M.W.M.B CHANDRASEKARA - MATALE DISTRIBUTOR</h4>
+              <p>{new Date(viewedSale.createdAt).toLocaleString()} • {viewedSale.customerName} • {viewedSale.paymentType}</p>
+              <div className="admin-table receipt-table">
+                <header>
+                  <span>Item Code</span>
+                  <span>Qty</span>
+                  <span>Price</span>
+                  <span>Total</span>
+                </header>
+                {(viewedSale.lines || []).map((line) => (
+                  <article key={`${viewedSale.id}-${line.productId}`}>
+                    <span>{line.sku || productInfoById.get(line.productId)?.sku || "-"}</span>
+                    <span>{line.quantity}</span>
+                    <span>{currency(line.price)}</span>
+                    <span>{currency(Number(line.price || 0) * Number(line.quantity || 0))}</span>
+                  </article>
+                ))}
+              </div>
+              <p className="form-hint">Discount: {currency(viewedSale.discount || 0)}</p>
+              <p className="form-hint"><strong>Total: {currency(viewedSale.total || 0)}</strong></p>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {deliverySale ? (
+        <div className="low-stock-modal" onClick={() => { setDeliverySaleId(""); setDeliveryDraft({}); setDeliveryError(""); }}>
+          <div className="low-stock-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Confirm Delivery #{deliverySale.id}</h3>
+              <button type="button" onClick={() => { setDeliverySaleId(""); setDeliveryDraft({}); setDeliveryError(""); }}>Close</button>
+            </div>
+            <p className="form-hint">{new Date(deliverySale.createdAt).toLocaleString()} • {deliverySale.cashier || "-"} • {deliverySale.lorry || "-"}</p>
+            <div className="admin-table deliveries-lines-table">
+              <header>
+                <span>Item</span>
+                <span>Sold</span>
+                <span>Already ND</span>
+                <span>Not Delivered</span>
+              </header>
+              {(deliverySale.lines || []).map((line) => {
+                const prevUndelivered = (deliverySale.deliveryAdjustments || [])
+                  .reduce((acc, adj) => acc + (adj.lines || [])
+                    .filter((x) => x.productId === line.productId)
+                    .reduce((xAcc, x) => xAcc + Number(x.quantity || 0), 0), 0);
+                const prevReturnedGood = (state.returns || [])
+                  .filter((ret) => String(ret.saleId) === String(deliverySale.id))
+                  .reduce((acc, ret) => acc + (ret.lines || [])
+                    .filter((x) => x.productId === line.productId && String(x.condition || "").toLowerCase() === "good")
+                    .reduce((xAcc, x) => xAcc + Number(x.quantity || 0), 0), 0);
+                const maxQty = Math.max(0, Number(line.quantity || 0) - prevUndelivered - prevReturnedGood);
+                return (
+                  <article key={`dl-${deliverySale.id}-${line.productId}`}>
+                    <span>{line.name}</span>
+                    <span>{line.quantity}</span>
+                    <span>{prevUndelivered}</span>
+                    <span>
+                      <input
+                        type="number"
+                        min="0"
+                        max={maxQty}
+                        value={deliveryDraft[line.productId] ?? ""}
+                        onChange={(e) => onDeliveryDraftChange(line.productId, e.target.value)}
+                        placeholder={`max ${maxQty}`}
+                      />
+                    </span>
+                  </article>
+                );
+              })}
+            </div>
+            <div className="delivery-history">
+              <h4>Delivery History</h4>
+              {(deliverySale.deliveryAdjustments || []).length ? (
+                <div className="delivery-history-list">
+                  {deliverySale.deliveryAdjustments.map((adj) => (
+                    <article key={adj.id} className="delivery-history-row">
+                      <p>
+                        <strong>{new Date(adj.createdAt).toLocaleString()}</strong>
+                        {" • "}
+                        {adj.by || "admin"}
+                      </p>
+                      <p>
+                        {(adj.lines || []).map((line) => `${line.name}: ${line.quantity}`).join(" | ")}
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="form-hint">No previous delivery adjustments.</p>
+              )}
+            </div>
+            {deliveryError ? <p className="form-hint">{deliveryError}</p> : null}
+            <div className="admin-page-actions">
+              <button type="button" onClick={saveDeliveryAdjust} disabled={savingDelivery}>
+                {savingDelivery ? "Saving..." : "Confirm Delivery"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showLowStock ? (
         <div className="low-stock-modal" onClick={() => setShowLowStock(false)}>
@@ -1845,8 +2554,15 @@ export const App = () => {
   const [discountValue, setDiscountValue] = useState("");
   const [cart, setCart] = useState([]);
   const [message, setMessage] = useState("");
+  const [errorModal, setErrorModal] = useState("");
   const [authError, setAuthError] = useState("");
   const [session, setSession] = useState(null);
+
+  const showErrorModal = (text) => {
+    const value = String(text || "").trim();
+    setMessage("");
+    setErrorModal(value || "Something went wrong.");
+  };
 
   const taxRate = 0;
   const effectiveCartLines = useMemo(
@@ -1905,7 +2621,7 @@ export const App = () => {
         setState(freshState);
         setDashboard(freshDashboard);
       } catch (error) {
-        if (mounted) setMessage(error.message);
+        if (mounted) showErrorModal(error.message);
       }
     };
 
@@ -1937,171 +2653,6 @@ export const App = () => {
     if (paymentType !== "cash") setCashReceived("");
     if (paymentType !== "credit") setCreditDueDate("");
   }, [paymentType]);
-
-  const printSaleReceipt = (sale) => {
-    if (typeof window === "undefined") return;
-
-    const toMoney = (value) => Number(value || 0).toFixed(2);
-    const saleDate = new Date(sale?.createdAt || Date.now());
-    const dateLabel = Number.isNaN(saleDate.getTime())
-      ? ""
-      : `${String(saleDate.getDate()).padStart(2, "0")}/${String(saleDate.getMonth() + 1).padStart(2, "0")}/${saleDate.getFullYear()}`;
-
-    const pickedCustomer = String(sale?.customerName || customerName || "Walk-in").trim() || "Walk-in";
-    const customer = (state.customers || []).find(
-      (row) => String(row?.name || "").trim().toLowerCase() === pickedCustomer.toLowerCase()
-    );
-
-    const baseLines = Array.isArray(sale?.lines) && sale.lines.length ? sale.lines : effectiveCartLines;
-    const lines = baseLines.slice(0, 12).map((line) => {
-      const qty = Math.max(0, Number(line?.quantity || 0));
-      const billingPrice = Number(line?.basePrice ?? line?.price ?? 0);
-      const itemDiscount = Math.max(0, Number(line?.itemDiscount || 0));
-      const netUnit = Math.max(0, Number(line?.price ?? (billingPrice - itemDiscount)));
-      const sku = line?.sku
-        || (state.products || []).find((product) => product.id === line?.productId)?.sku
-        || "";
-      return {
-        sku,
-        qty,
-        billingPrice,
-        itemDiscount,
-        total: netUnit * qty
-      };
-    });
-
-    const minRows = 8;
-    const rowsHtml = [...lines, ...Array.from({ length: Math.max(0, minRows - lines.length) }).map(() => null)]
-      .map((line) => {
-        if (!line) {
-          return "<tr><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>";
-        }
-        return `<tr>
-          <td>${escapeHtml(line.sku)}</td>
-          <td>${line.qty}</td>
-          <td>${toMoney(line.billingPrice)}</td>
-          <td>${toMoney(line.itemDiscount)}</td>
-          <td>${toMoney(line.total)}</td>
-        </tr>`;
-      })
-      .join("");
-
-    const printWindow = window.open("", "_blank", "width=1000,height=1300");
-    if (!printWindow) {
-      setMessage(`Sale ${sale.id} completed. Allow popups to print receipt.`);
-      return;
-    }
-
-    const receiptHtml = `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Receipt #${escapeHtml(sale.id)}</title>
-    <style>
-      @page { size: A4 portrait; margin: 10mm; }
-      body { margin: 0; background: #ffffff; font-family: "Segoe UI", Arial, sans-serif; color: #111; }
-      .sheet { width: 100%; max-width: 190mm; margin: 0 auto; padding: 4mm; }
-      .header { background: #dfe1e4; border: 1px solid #ced2d8; padding: 10px 12px; display: grid; grid-template-columns: 130px 1fr; gap: 14px; align-items: center; }
-      .logo-wrap { display: grid; justify-items: center; gap: 4px; }
-      .logo-wrap img { width: 100px; height: 100px; object-fit: contain; }
-      .brand-title { text-align: center; font-weight: 900; font-size: 26px; line-height: 1.05; letter-spacing: 0.4px; text-transform: uppercase; }
-      .brand-sub { margin: 10px auto 0; width: fit-content; background: #fff; border-radius: 14px; padding: 8px 20px; font-size: 22px; font-weight: 700; }
-      .meta { margin-top: 12px; border: 1px solid #1f2937; border-radius: 16px; padding: 8px 10px; display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: center; }
-      .meta-box { border: 1px solid #1f2937; height: 90px; }
-      .meta-grid { display: grid; grid-template-columns: 1fr auto; gap: 8px 24px; font-size: 18px; }
-      .dots { border-bottom: 1px dotted #222; min-width: 230px; display: inline-block; margin-left: 5px; }
-      table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
-      th, td { border: 1px solid #111; padding: 7px 8px; text-align: left; height: 34px; }
-      th { background: #d9e0ea; font-size: 17px; font-weight: 800; text-transform: uppercase; }
-      th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { text-align: center; }
-      .totals-grid { margin-top: 14px; display: grid; grid-template-columns: 1fr 1.1fr; gap: 14px; }
-      .totals-box, .summary-box { border: 1px solid #5b8de0; min-height: 92px; padding: 10px 12px; font-size: 18px; }
-      .summary-box { background: #d9e0ea; border-color: #c8d0dc; }
-      .summary-box strong { font-size: 24px; }
-      .notes { margin-top: 16px; font-size: 18px; font-weight: 600; line-height: 1.45; }
-      .notes li { margin-bottom: 3px; }
-      .signatures { margin-top: 70px; display: grid; grid-template-columns: 1fr 1fr; gap: 30px; text-align: center; font-size: 18px; }
-      .sign-line { margin-bottom: 8px; letter-spacing: 2px; }
-      .powered { text-align: center; margin-top: 80px; font-size: 20px; }
-    </style>
-  </head>
-  <body>
-    <div class="sheet">
-      <div class="header">
-        <div class="logo-wrap">
-          <img src="/pepsi-logo.png" alt="Pepsi logo" />
-        </div>
-        <div>
-          <div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div>
-          <div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div>
-        </div>
-      </div>
-
-      <div class="meta">
-        <div class="meta-box"></div>
-        <div class="meta-grid">
-          <div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div>
-          <div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div>
-          <div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div>
-          <div>Tel : <span class="dots">${escapeHtml(customer?.phone || "-")}</span></div>
-        </div>
-      </div>
-
-      <table>
-        <thead>
-          <tr>
-            <th>Item Code</th>
-            <th>Qty</th>
-            <th>Billing Price</th>
-            <th>Item Discount</th>
-            <th>Total</th>
-          </tr>
-        </thead>
-        <tbody>${rowsHtml}</tbody>
-      </table>
-
-      <div class="totals-grid">
-        <div class="totals-box">
-          <div>EMPTY ISSUE :</div>
-          <div>EMPTY RECEIVED :</div>
-        </div>
-        <div class="summary-box">
-          <div><strong>TOTAL VALUE :</strong> LKR ${toMoney(sale?.total)}</div>
-          <div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div>
-          <div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div>
-        </div>
-      </div>
-
-      <ul class="notes">
-        <li>Return or exchange only with this receipt</li>
-        <li>Credit Payment for all goods shall be made No later than 14 days</li>
-      </ul>
-
-      <div class="signatures">
-        <div>
-          <div class="sign-line">.......................................</div>
-          <div>Customer Signature</div>
-          <div>Rubber Stamp</div>
-        </div>
-        <div>
-          <div class="sign-line">.......................................</div>
-          <div>P.S.R Signature</div>
-        </div>
-      </div>
-
-      <div class="powered">Powered By J&amp;Co.</div>
-    </div>
-  </body>
-</html>`;
-
-    printWindow.document.open();
-    printWindow.document.write(receiptHtml);
-    printWindow.document.close();
-    printWindow.focus();
-    setTimeout(() => {
-      printWindow.print();
-    }, 250);
-  };
 
   const login = async ({ username, password }) => {
     const attempts = [
@@ -2139,18 +2690,18 @@ export const App = () => {
   const checkout = async () => {
     try {
       if (!lorry) {
-        setMessage("Select delivery lorry (Lorry A or Lorry B).");
+        showErrorModal("Select delivery lorry (Lorry A or Lorry B).");
         return;
       }
       if (paymentType === "cash") {
         const paid = Number(cashReceived || 0);
         if (!Number.isFinite(paid) || paid < 0) {
-          setMessage("Cash received must be 0 or more.");
+          showErrorModal("Cash received must be 0 or more.");
           return;
         }
       }
       if (paymentType === "credit" && !creditDueDate) {
-        setMessage("Select credit due date.");
+        showErrorModal("Select credit due date.");
         return;
       }
       const sale = await submitSale({
@@ -2164,7 +2715,13 @@ export const App = () => {
         taxRate: 0,
         lines: effectiveCartLines
       });
-      printSaleReceipt(sale);
+      openSaleReceiptPrint({
+        sale,
+        customers: state.customers || [],
+        products: state.products || [],
+        fallbackCustomerName: customerName,
+        onPopupBlocked: () => showErrorModal(`Sale ${sale.id} completed, but popup is blocked. Allow popups to print receipt.`)
+      });
       setMessage(`Sale ${sale.id} completed. Total ${currency(sale.total)}.`);
       setCart([]);
       setDiscountValue("");
@@ -2172,7 +2729,7 @@ export const App = () => {
       setCreditDueDate("");
       setDashboard(await fetchDashboard());
     } catch (error) {
-      setMessage(error.message);
+      showErrorModal(error.message);
     }
   };
 
@@ -2215,8 +2772,20 @@ export const App = () => {
           state={state}
           dashboard={dashboard}
           message={message}
+          onError={showErrorModal}
         />
       )}
+      {errorModal ? (
+        <div className="low-stock-modal" onClick={() => setErrorModal("")}>
+          <div className="low-stock-modal-card error-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Error</h3>
+              <button type="button" onClick={() => setErrorModal("")}>Close</button>
+            </div>
+            <p className="error-modal-text">{errorModal}</p>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };

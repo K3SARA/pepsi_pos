@@ -14,7 +14,7 @@
       "price": 100,
       "billingPrice": 92,
       "mrp": 100,
-      "stock": 58
+      "stock": 40
     },
     {
       "id": "p-Z5VSCHCv",
@@ -36,7 +36,7 @@
       "price": 100,
       "billingPrice": 92,
       "mrp": 100,
-      "stock": 71
+      "stock": 73
     },
     {
       "id": "p-jXDUZOii",
@@ -515,32 +515,35 @@
   "sales": [
     {
       "id": "00006",
-      "createdAt": "2026-03-06T21:53:33.323Z",
+      "createdAt": "2026-03-07T22:38:10.698Z",
       "cashier": "rep1",
-      "customerName": "Shavinda",
+      "customerName": "Bawantha",
       "lorry": "Lorry A",
-      "paymentType": "credit",
+      "paymentType": "cash",
       "notes": "",
-      "discount": 80,
+      "discount": 0,
       "taxRate": 0,
       "lines": [
         {
           "productId": "p-3FWsPhiW",
           "name": "Sting 200 ml",
-          "quantity": 2,
+          "quantity": 20,
           "price": 92
         }
       ],
-      "subTotal": 184,
-      "discountAmount": 80,
-      "taxable": 104,
+      "subTotal": 1840,
+      "discountAmount": 0,
+      "taxable": 1840,
       "tax": 0,
-      "total": 104,
+      "total": 1840,
       "paidAmount": 0,
-      "dueAmount": 104,
-      "cashReceived": null,
-      "creditDueDate": "2026-03-28",
-      "outstandingAmount": 104
+      "dueAmount": 1840,
+      "cashReceived": 0,
+      "creditDueDate": "",
+      "outstandingAmount": 1840,
+      "deliveryAdjustments": [],
+      "deliveryConfirmedAt": "2026-03-07T22:56:25.299Z",
+      "deliveryConfirmedBy": "admin"
     },
     {
       "id": "00005",
@@ -575,7 +578,10 @@
       "dueAmount": 1676.55,
       "cashReceived": null,
       "creditDueDate": "2026-03-06",
-      "outstandingAmount": 1676.55
+      "outstandingAmount": 1676.55,
+      "deliveryAdjustments": [],
+      "deliveryConfirmedAt": "2026-03-07T21:22:41.352Z",
+      "deliveryConfirmedBy": "admin"
     },
     {
       "id": "00004",
@@ -616,7 +622,10 @@
       "dueAmount": 11110.33,
       "cashReceived": null,
       "creditDueDate": "2026-03-20",
-      "outstandingAmount": 11110.33
+      "outstandingAmount": 11110.33,
+      "deliveryAdjustments": [],
+      "deliveryConfirmedAt": "2026-03-07T21:23:11.556Z",
+      "deliveryConfirmedBy": "admin"
     },
     {
       "id": "00003",
@@ -710,7 +719,23 @@
       "dueAmount": 0,
       "cashReceived": null,
       "creditDueDate": "2026-03-20",
-      "outstandingAmount": 2000
+      "outstandingAmount": 2000,
+      "deliveryAdjustments": [
+        {
+          "id": "QyTIhbi4_aq3",
+          "createdAt": "2026-03-07T22:57:36.126Z",
+          "by": "admin",
+          "lines": [
+            {
+              "productId": "p-x21U5bc6",
+              "name": "Ginger Beer 200 ml",
+              "quantity": 2
+            }
+          ]
+        }
+      ],
+      "deliveryConfirmedAt": "2026-03-07T22:57:36.126Z",
+      "deliveryConfirmedBy": "admin"
     },
     {
       "id": "00001",

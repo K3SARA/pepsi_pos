@@ -119,6 +119,17 @@ export const patchSale = (id, payload) =>
     body: JSON.stringify(payload)
   });
 
+export const deleteSale = (id) =>
+  request(`/sales/${id}`, {
+    method: "DELETE"
+  });
+
+export const submitDeliveryAdjustment = (id, payload) =>
+  request(`/sales/${id}/delivery-adjust`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+
 export const submitReturn = (payload) =>
   request("/returns", {
     method: "POST",

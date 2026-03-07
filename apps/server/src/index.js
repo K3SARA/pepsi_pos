@@ -466,7 +466,8 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
 
   const saleCashier = String(sale.cashier || "").trim().toLowerCase();
   const actingUser = String(req.user?.username || "").trim().toLowerCase();
-  if (!saleCashier || saleCashier !== actingUser) {
+  const isAdmin = String(req.user?.role || "").toLowerCase() === "admin";
+  if (!isAdmin && (!saleCashier || saleCashier !== actingUser)) {
     res.status(403).json({ message: "Only the rep who created this sale can edit it" });
     return;
   }
@@ -560,6 +561,43 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
   io.emit(SOCKET_EVENTS.INVENTORY_UPDATED, next.products);
   sendFullSync();
   res.json(recalculated);
+});
+
+app.delete("/sales/:id", requireAuth, requireRole("admin"), (req, res) => {
+  const { id } = req.params;
+  const state = getState();
+  const sale = (state.sales || []).find((item) => String(item.id) === String(id));
+  if (!sale) {
+    res.status(404).json({ message: "Sale not found" });
+    return;
+  }
+
+  const returnedByProduct = new Map();
+  for (const ret of (state.returns || [])) {
+    if (String(ret.saleId) !== String(id)) continue;
+    for (const line of (ret.lines || [])) {
+      returnedByProduct.set(line.productId, (returnedByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
+    }
+  }
+
+  const next = updateState((draft) => {
+    // Restore only net sold qty not already returned.
+    for (const line of (sale.lines || [])) {
+      const product = draft.products.find((item) => item.id === line.productId);
+      if (!product) continue;
+      const sold = Number(line.quantity || 0);
+      const alreadyReturned = Number(returnedByProduct.get(line.productId) || 0);
+      const netSold = Math.max(0, sold - alreadyReturned);
+      product.stock = Number((Number(product.stock || 0) + netSold).toFixed(2));
+    }
+    draft.sales = (draft.sales || []).filter((item) => String(item.id) !== String(id));
+    draft.returns = (draft.returns || []).filter((ret) => String(ret.saleId) !== String(id));
+    return draft;
+  });
+
+  io.emit(SOCKET_EVENTS.INVENTORY_UPDATED, next.products);
+  sendFullSync();
+  res.json({ ok: true, id: String(id) });
 });
 
 app.post("/returns", requireAuth, requireRole("cashier", "admin"), (req, res) => {
@@ -656,6 +694,100 @@ app.post("/returns", requireAuth, requireRole("cashier", "admin"), (req, res) =>
   io.emit(SOCKET_EVENTS.INVENTORY_UPDATED, next.products);
   sendFullSync();
   res.status(201).json(record);
+});
+
+app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, res) => {
+  const { id } = req.params;
+  const body = req.body || {};
+  const incomingLines = Array.isArray(body.lines) ? body.lines : [];
+  const markConfirmed = body.markConfirmed !== false;
+
+  const state = getState();
+  const sale = (state.sales || []).find((item) => String(item.id) === String(id));
+  if (!sale) {
+    res.status(404).json({ message: "Sale not found" });
+    return;
+  }
+
+  const saleLines = Array.isArray(sale.lines) ? sale.lines : [];
+  const soldByProduct = new Map();
+  for (const line of saleLines) {
+    soldByProduct.set(line.productId, (soldByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
+  }
+
+  const alreadyUndelivered = new Map();
+  for (const adj of (sale.deliveryAdjustments || [])) {
+    for (const line of (adj.lines || [])) {
+      alreadyUndelivered.set(line.productId, (alreadyUndelivered.get(line.productId) || 0) + Number(line.quantity || 0));
+    }
+  }
+
+  const alreadyReturnedGood = new Map();
+  for (const ret of (state.returns || [])) {
+    if (String(ret.saleId) !== String(sale.id)) continue;
+    for (const line of (ret.lines || [])) {
+      if (String(line.condition || "").toLowerCase() !== "good") continue;
+      alreadyReturnedGood.set(line.productId, (alreadyReturnedGood.get(line.productId) || 0) + Number(line.quantity || 0));
+    }
+  }
+
+  const preparedLines = [];
+  for (const line of incomingLines) {
+    const productId = String(line.productId || "").trim();
+    const quantity = Number(line.quantity || 0);
+    if (!productId || !Number.isFinite(quantity) || quantity <= 0) continue;
+    const sold = Number(soldByProduct.get(productId) || 0);
+    if (sold <= 0) {
+      res.status(400).json({ message: "Invalid delivery line product" });
+      return;
+    }
+    const prevUndelivered = Number(alreadyUndelivered.get(productId) || 0);
+    const prevReturnedGood = Number(alreadyReturnedGood.get(productId) || 0);
+    const maxAllowed = Math.max(0, sold - prevUndelivered - prevReturnedGood);
+    if (quantity > maxAllowed) {
+      const saleLine = saleLines.find((item) => item.productId === productId);
+      res.status(409).json({ message: `Undelivered qty exceeds remaining for ${saleLine?.name || productId}` });
+      return;
+    }
+    const saleLine = saleLines.find((item) => item.productId === productId);
+    preparedLines.push({
+      productId,
+      name: saleLine?.name || productId,
+      quantity
+    });
+  }
+
+  const adjustmentRecord = preparedLines.length ? {
+    id: nanoid(12),
+    createdAt: new Date().toISOString(),
+    by: req.user?.username || "admin",
+    lines: preparedLines
+  } : null;
+
+  const next = updateState((draft) => {
+    const idx = (draft.sales || []).findIndex((item) => String(item.id) === String(id));
+    if (idx === -1) return draft;
+    const target = draft.sales[idx];
+    target.deliveryAdjustments = target.deliveryAdjustments || [];
+    if (adjustmentRecord) {
+      target.deliveryAdjustments.push(adjustmentRecord);
+      for (const line of adjustmentRecord.lines) {
+        const product = (draft.products || []).find((item) => item.id === line.productId);
+        if (!product) continue;
+        product.stock = Number((Number(product.stock || 0) + Number(line.quantity || 0)).toFixed(2));
+      }
+    }
+    if (markConfirmed) {
+      target.deliveryConfirmedAt = new Date().toISOString();
+      target.deliveryConfirmedBy = req.user?.username || "admin";
+    }
+    return draft;
+  });
+
+  io.emit(SOCKET_EVENTS.INVENTORY_UPDATED, next.products);
+  sendFullSync();
+  const updatedSale = (next.sales || []).find((item) => String(item.id) === String(id));
+  res.status(201).json(updatedSale);
 });
 
 app.get("/dashboard", requireAuth, (_req, res) => {
