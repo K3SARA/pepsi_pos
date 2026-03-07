@@ -110,6 +110,7 @@ const seedAuthState = {
 };
 
 const writeAuthState = (state) => {
+  fs.mkdirSync(path.dirname(AUTH_FILE), { recursive: true });
   fs.writeFileSync(AUTH_FILE, JSON.stringify(state, null, 2), "utf8");
 };
 
