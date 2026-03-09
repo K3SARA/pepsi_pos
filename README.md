@@ -65,6 +65,24 @@ Unified POS system with synced web + mobile clients:
 ## Build
 - Web production build: `npm run build -w apps/web`
 
+## Automatic Database Backups
+This repo includes a GitHub Actions workflow that runs a daily PostgreSQL backup and stores it as a build artifact.
+
+Files:
+- `.github/workflows/db-backup.yml`
+- `scripts/db-backup.sh`
+
+Setup:
+1. Open your GitHub repo: `Settings -> Secrets and variables -> Actions`.
+2. Add a secret named `DATABASE_URL`.
+3. Use your production Postgres connection string.
+4. Go to `Actions -> Database Backup` and click `Run workflow` once to verify.
+
+Restore example:
+```bash
+gunzip -c pepsi-pos-backup-YYYYMMDD-HHMMSS.sql.gz | psql "postgresql://USER:PASSWORD@HOST:PORT/DBNAME"
+```
+
 ## Notes
 - Initial data is auto-seeded in `apps/server/data.json` on first run.
 - If you need exact parity with your previous POS's custom edge cases, send that feature list and I will map them 1:1 into this codebase.

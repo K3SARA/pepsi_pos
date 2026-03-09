@@ -77,7 +77,16 @@ const getBundleBreakdown = (row) => {
 };
 const productSalePrice = (product) => Number(product?.billingPrice ?? product?.price ?? product?.mrp ?? 0);
 const lineBasePrice = (line) => Number(line?.basePrice ?? line?.price ?? 0);
-const lineItemDiscount = (line) => Number(line?.itemDiscount || 0);
+const lineItemDiscount = (line) => {
+  const raw = Number(line?.itemDiscount || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  const base = lineBasePrice(line);
+  if (String(line?.itemDiscountMode || "amount") === "percent") {
+    const percent = Math.min(raw, 100);
+    return Number(((base * percent) / 100).toFixed(2));
+  }
+  return Math.min(raw, base);
+};
 const lineFinalPrice = (line) => Math.max(0, lineBasePrice(line) - Math.max(0, lineItemDiscount(line)));
 
 const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCustomerName = "", onPopupBlocked = () => {} }) => {
@@ -169,7 +178,9 @@ const LoginScreen = ({ onLogin, error }) => {
         {error ? <p className="auth-error">{error}</p> : null}
         <button className="auth-submit" type="button" onClick={() => onLogin({ username, password })}>Sign in</button>
         <div className="auth-bottom-logo">
-          
+          <a href="https://www.jnco.tech" target="_blank" rel="noreferrer">
+            <img src="/powered.png" alt="Powered by" />
+          </a>
         </div>
       </div>
     </div>
@@ -247,6 +258,7 @@ const CashierView = ({
     const reserved = Number(cartQtyByProduct.get(product?.id) || 0);
     return Math.max(0, currentStock - reserved);
   };
+  const lowStockThreshold = Number(state?.settings?.lowStockThreshold ?? 20);
 
   const savedCustomers = useMemo(() => {
     return [...(state.customers || [])].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
@@ -287,6 +299,48 @@ const CashierView = ({
     return { orders, revenue: Number(revenue.toFixed(2)) };
   }, [cashier, state.sales]);
 
+  const damagedQtyByProduct = useMemo(() => {
+    const map = new Map();
+    for (const ret of (state.returns || [])) {
+      for (const line of (ret.lines || [])) {
+        if (String(line.condition || "").toLowerCase() !== "damaged") continue;
+        map.set(line.productId, (map.get(line.productId) || 0) + Number(line.quantity || 0));
+      }
+    }
+    return map;
+  }, [state.returns]);
+
+  const repStockRows = useMemo(() => {
+    return (state.products || [])
+      .map((product) => {
+        const remaining = Number(product.stock || 0);
+        const damaged = Number(damagedQtyByProduct.get(product.id) || 0);
+        return {
+          id: product.id,
+          name: productDisplayName(product),
+          billingPrice: Number(product?.billingPrice ?? product?.price ?? 0),
+          mrp: Number(product?.mrp ?? product?.price ?? 0),
+          remaining,
+          damaged
+        };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [state.products, damagedQtyByProduct]);
+
+  const repStockSummary = useMemo(() => {
+    let remainingTotal = 0;
+    let damagedTotal = 0;
+    for (const row of repStockRows) {
+      remainingTotal += Number(row.remaining || 0);
+      damagedTotal += Number(row.damaged || 0);
+    }
+    return {
+      remainingItems: remainingTotal,
+      damagedItems: damagedTotal,
+      damagedSkus: repStockRows.filter((row) => row.damaged > 0).length
+    };
+  }, [repStockRows]);
+
   const customerNameOptions = useMemo(() => {
     const names = new Set((state.customers || []).map((item) => String(item.name || "").trim()).filter(Boolean));
     return [...names].sort((a, b) => a.localeCompare(b));
@@ -322,7 +376,15 @@ const CashierView = ({
       const available = Math.max(0, Number(product.stock || 0) - alreadyInCart);
       if (available <= 0) return current;
       const addQty = Math.min(available, requestQty);
-      if (idx === -1) return [...current, { productId: product.id, name: productDisplayName(product), basePrice: productSalePrice(product), itemDiscount: 0, price: productSalePrice(product), quantity: addQty }];
+      if (idx === -1) return [...current, {
+        productId: product.id,
+        name: productDisplayName(product),
+        basePrice: productSalePrice(product),
+        itemDiscount: 0,
+        itemDiscountMode: "amount",
+        price: productSalePrice(product),
+        quantity: addQty
+      }];
       const clone = [...current];
       clone[idx] = { ...clone[idx], quantity: clone[idx].quantity + addQty };
       return clone;
@@ -347,7 +409,20 @@ const CashierView = ({
     setCart((current) => current.map((line) => {
       if (line.productId !== productId) return line;
       const base = lineBasePrice(line);
+      const mode = String(line.itemDiscountMode || "amount");
+      if (mode === "percent") return { ...line, itemDiscount: Math.min(parsed, 100) };
       return { ...line, itemDiscount: Math.min(parsed, base) };
+    }));
+  };
+  const updateItemDiscountMode = (productId, mode) => {
+    setCart((current) => current.map((line) => {
+      if (line.productId !== productId) return line;
+      const nextMode = mode === "percent" ? "percent" : "amount";
+      const currentValue = Number(line.itemDiscount || 0);
+      const clamped = nextMode === "percent"
+        ? Math.min(Math.max(0, currentValue), 100)
+        : Math.min(Math.max(0, currentValue), lineBasePrice(line));
+      return { ...line, itemDiscountMode: nextMode, itemDiscount: clamped };
     }));
   };
   const [showAddCustomer, setShowAddCustomer] = useState(false);
@@ -358,15 +433,51 @@ const CashierView = ({
   const [catalogQtyDrafts, setCatalogQtyDrafts] = useState({});
   const [cashierPage, setCashierPage] = useState("billing");
   const [returnSaleId, setReturnSaleId] = useState("");
+  const [returnCustomerName, setReturnCustomerName] = useState("");
+  const [showReturnCustomerSuggestions, setShowReturnCustomerSuggestions] = useState(false);
   const [returnLinesDraft, setReturnLinesDraft] = useState({});
   const [returnError, setReturnError] = useState("");
   const [savingReturn, setSavingReturn] = useState(false);
   const lastHapticAtRef = useRef(0);
+  const [mobileCashierNavOpen, setMobileCashierNavOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileCashierNavOpen(false);
+  }, [cashierPage]);
 
   const returnSale = useMemo(
     () => state.sales.find((sale) => String(sale.id) === String(returnSaleId).trim()) || null,
     [state.sales, returnSaleId]
   );
+
+  const returnCustomerOptions = useMemo(() => {
+    const rep = String(cashier || "").trim().toLowerCase();
+    const names = new Set(
+      (state.sales || [])
+        .filter((sale) => String(sale.cashier || "").trim().toLowerCase() === rep)
+        .map((sale) => String(sale.customerName || "").trim())
+        .filter(Boolean)
+    );
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [state.sales, cashier]);
+
+  const filteredReturnCustomerOptions = useMemo(() => {
+    const term = String(returnCustomerName || "").trim().toLowerCase();
+    if (!term) return [];
+    return returnCustomerOptions.filter((name) => name.toLowerCase().includes(term)).slice(0, 8);
+  }, [returnCustomerName, returnCustomerOptions]);
+
+  const returnSalesForCustomer = useMemo(() => {
+    const rep = String(cashier || "").trim().toLowerCase();
+    const selected = String(returnCustomerName || "").trim().toLowerCase();
+    if (!selected) return [];
+    return (state.sales || [])
+      .filter((sale) =>
+        String(sale.cashier || "").trim().toLowerCase() === rep
+        && String(sale.customerName || "").trim().toLowerCase() === selected
+      )
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }, [state.sales, cashier, returnCustomerName]);
 
   const returnedQtyByProduct = useMemo(() => {
     const map = new Map();
@@ -512,10 +623,46 @@ const CashierView = ({
   return (
     <>
       {message && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(message)) ? <p className="notice">{message}</p> : null}
+      <button
+        type="button"
+        className={`cashier-mobile-nav-toggle menu-toggle-btn ${mobileCashierNavOpen ? "open" : ""}`}
+        onClick={() => setMobileCashierNavOpen((current) => !current)}
+        aria-expanded={mobileCashierNavOpen}
+        aria-controls="cashier-sidebar-nav"
+        aria-label={mobileCashierNavOpen ? "Close menu" : "Open menu"}
+      >
+        <span className="menu-toggle-icon" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </span>
+        <span className="menu-toggle-label">{mobileCashierNavOpen ? "Close" : "Menu"}</span>
+      </button>
+      {mobileCashierNavOpen ? (
+        <button
+          type="button"
+          className="cashier-mobile-nav-backdrop"
+          onClick={() => setMobileCashierNavOpen(false)}
+          aria-label="Close menu"
+        />
+      ) : null}
+      <aside id="cashier-sidebar-nav" className={`cashier-mobile-sidebar ${mobileCashierNavOpen ? "open" : ""}`}>
+        <button type="button" className={cashierPage === "billing" ? "active" : ""} onClick={() => setCashierPage("billing")}>Billing</button>
+        <button type="button" className={cashierPage === "returns" ? "active" : ""} onClick={() => setCashierPage("returns")}>Returns</button>
+        <button type="button" className={cashierPage === "sales" ? "active" : ""} onClick={() => setCashierPage("sales")}>Sales</button>
+        <button type="button" className={cashierPage === "stock" ? "active" : ""} onClick={() => setCashierPage("stock")}>Stock</button>
+        <button type="button" className={cashierPage === "customers" ? "active" : ""} onClick={() => setCashierPage("customers")}>Customers</button>
+        <div className="side-menu-footer">
+          <a href="https://www.jnco.tech" target="_blank" rel="noreferrer">
+            <img src="/powered.png" alt="Powered by" />
+          </a>
+        </div>
+      </aside>
       <div className="cashier-tabs">
         <button type="button" className={cashierPage === "billing" ? "active" : ""} onClick={() => setCashierPage("billing")}>Billing</button>
         <button type="button" className={cashierPage === "returns" ? "active" : ""} onClick={() => setCashierPage("returns")}>Returns</button>
         <button type="button" className={cashierPage === "sales" ? "active" : ""} onClick={() => setCashierPage("sales")}>Sales</button>
+        <button type="button" className={cashierPage === "stock" ? "active" : ""} onClick={() => setCashierPage("stock")}>Stock</button>
         <button type="button" className={cashierPage === "customers" ? "active" : ""} onClick={() => setCashierPage("customers")}>Customers</button>
       </div>
 
@@ -523,14 +670,20 @@ const CashierView = ({
         <main className="grid billing-grid">
           <section className="panel">
             <h2 className="panel-title"><span className="panel-icon" aria-hidden="true">📦</span>Catalog</h2>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search product / sku / category" />
+            <input className="search-icon-input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search product / sku / category" />
             <div className="list">
               {filteredProducts.map((product) => (
                 <article key={product.id} className="list-row">
                   <div>
                     <strong>{productDisplayName(product)}</strong>
                     <p>{product.sku} • {product.category}</p>
-                    <p>{currency(productSalePrice(product))} • Stock {getCatalogStock(product)}</p>
+                    <p>
+                      {currency(productSalePrice(product))}
+                      {" • "}
+                      <span className={getCatalogStock(product) <= lowStockThreshold ? "stock-low-text" : ""}>
+                        Stock {getCatalogStock(product)}
+                      </span>
+                    </p>
                   </div>
                   <div className="catalog-add-wrap">
                     <input
@@ -554,18 +707,26 @@ const CashierView = ({
                <section className="panel">
               {cart.length ? cart.map((line) => (
                 <article className="list-row" key={line.productId}>
-                  <div>
+                  <div className="cart-line-head">
                     <strong>{line.name}</strong>
                     <p>{currency(lineBasePrice(line))} each • Item Disc {currency(lineItemDiscount(line))} • Net {currency(lineFinalPrice(line))}</p>
                   </div>
-                  <div className="qty-box">
-                    <button type="button" onClick={() => updateQty(line.productId, line.quantity - 1)}>-</button>
-                    <span>{line.quantity}</span>
-                    <button type="button" onClick={() => updateQty(line.productId, line.quantity + 1)}>+</button>
-                  </div>
-                  <div>
-                    <input type="number" min="0" step="0.01" value={line.itemDiscount ?? 0} onChange={(e) => updateItemDiscount(line.productId, e.target.value)} placeholder="Item Disc" />
-                    <p className="form-hint">Item Discount (Rs.)</p>
+                  <div className="cart-line-controls">
+                    <div className="qty-box">
+                      <button type="button" onClick={() => updateQty(line.productId, line.quantity - 1)}>-</button>
+                      <span>{line.quantity}</span>
+                      <button type="button" onClick={() => updateQty(line.productId, line.quantity + 1)}>+</button>
+                    </div>
+                    <div className="item-discount-wrap">
+                      <div className="item-discount-inline">
+                        <select value={line.itemDiscountMode || "amount"} onChange={(e) => updateItemDiscountMode(line.productId, e.target.value)}>
+                          <option value="amount">Rs.</option>
+                          <option value="percent">%</option>
+                        </select>
+                        <input type="number" min="0" step="0.01" value={line.itemDiscount ?? 0} onChange={(e) => updateItemDiscount(line.productId, e.target.value)} placeholder="Item Disc" />
+                      </div>
+                      <p className="form-hint">Item Discount ({line.itemDiscountMode === "percent" ? "%" : "Rs."})</p>
+                    </div>
                   </div>
               </article>
             )) : <p className="form-hint">Empty</p>}
@@ -657,9 +818,53 @@ const CashierView = ({
             <h2>Returns</h2>
             <div className="form-grid">
               <p className="form-hint">Rep: {cashier || "-"}</p>
+              <input
+                value={returnCustomerName}
+                onChange={(e) => {
+                  setReturnCustomerName(e.target.value);
+                  setShowReturnCustomerSuggestions(true);
+                  setReturnSaleId("");
+                  setReturnLinesDraft({});
+                  setReturnError("");
+                }}
+                onFocus={() => setShowReturnCustomerSuggestions(true)}
+                onBlur={() => setTimeout(() => setShowReturnCustomerSuggestions(false), 120)}
+                placeholder="Type customer name"
+              />
+              {showReturnCustomerSuggestions && filteredReturnCustomerOptions.length ? (
+                <div className="customer-suggestions">
+                  {filteredReturnCustomerOptions.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      onClick={() => {
+                        setReturnCustomerName(name);
+                        setShowReturnCustomerSuggestions(false);
+                        setReturnSaleId("");
+                        setReturnLinesDraft({});
+                        setReturnError("");
+                      }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <select
+                value={returnSaleId}
+                onChange={(e) => { setReturnSaleId(e.target.value); setReturnLinesDraft({}); setReturnError(""); }}
+                disabled={!returnCustomerName.trim()}
+              >
+                <option value="">{returnCustomerName.trim() ? "Select bill (Sale ID)" : "Select customer first"}</option>
+                {returnSalesForCustomer.map((sale) => (
+                  <option key={sale.id} value={sale.id}>
+                    #{sale.id} • {new Date(sale.createdAt).toLocaleDateString()} • {currency(sale.total)}
+                  </option>
+                ))}
+              </select>
               <input value={returnSaleId} onChange={(e) => { setReturnSaleId(e.target.value); setReturnLinesDraft({}); setReturnError(""); }} placeholder="Enter Sale ID (e.g. 00001)" />
             </div>
-            {!returnSaleId ? <p className="form-hint">Type a sale ID to load bill items.</p> : null}
+            {!returnSaleId ? <p className="form-hint">Select customer then bill, or type Sale ID manually to load bill items.</p> : null}
             {returnSaleId && !returnSale ? <p className="form-hint">Sale not found.</p> : null}
             {returnSale ? (
               <>
@@ -799,6 +1004,70 @@ const CashierView = ({
         </main>
       ) : null}
 
+      {cashierPage === "stock" ? (
+        <main className="grid">
+          <section className="panel rep-stock-panel">
+            <h2>Stock Overview</h2>
+            <div className="rep-stock-metrics">
+              <article>
+                <p>Remaining Items</p>
+                <strong>{repStockSummary.remainingItems}</strong>
+              </article>
+              <article className="danger">
+                <p>Damaged / Expired</p>
+                <strong>{repStockSummary.damagedItems}</strong>
+              </article>
+              <article>
+                <p>Affected SKUs</p>
+                <strong>{repStockSummary.damagedSkus}</strong>
+              </article>
+            </div>
+          </section>
+
+          <section className="panel rep-stock-panel">
+            <h2>Remaining Stock</h2>
+            <div className="rep-stock-table">
+              <header>
+                <span>Item</span>
+                <span>B.Price (LKR)</span>
+                <span>MRP</span>
+                <span>Remaining</span>
+              </header>
+              {repStockRows.map((row) => (
+                <article key={`remain-${row.id}`}>
+                  <span>{row.name}</span>
+                  <span>{Number(row.billingPrice || 0).toFixed(2)}</span>
+                  <span>{Number(row.mrp || 0).toFixed(2)}</span>
+                  <span>{row.remaining}</span>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel rep-stock-panel">
+            <h2>Damaged / Expired Stock</h2>
+            <div className="rep-stock-table rep-stock-table-danger">
+              <header>
+                <span>Item</span>
+                <span>B.Price (LKR)</span>
+                <span>MRP</span>
+                <span>Damaged Qty</span>
+              </header>
+              {repStockRows.filter((row) => row.damaged > 0).length ? repStockRows
+                .filter((row) => row.damaged > 0)
+                .map((row) => (
+                  <article key={`damaged-${row.id}`}>
+                    <span>{row.name}</span>
+                    <span>{Number(row.billingPrice || 0).toFixed(2)}</span>
+                    <span>{Number(row.mrp || 0).toFixed(2)}</span>
+                    <span>{row.damaged}</span>
+                  </article>
+                )) : <p className="form-hint">No damaged/expired items recorded yet.</p>}
+            </div>
+          </section>
+        </main>
+      ) : null}
+
       {cashierPage === "billing" ? (
         <div className="mobile-quickbar">
           <div>
@@ -876,6 +1145,9 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const [deliveryDateTo, setDeliveryDateTo] = useState("");
   const [deliveryReportDateFrom, setDeliveryReportDateFrom] = useState("");
   const [deliveryReportDateTo, setDeliveryReportDateTo] = useState("");
+  const [reportDeliveryLorry, setReportDeliveryLorry] = useState("all");
+  const [reportDeliveryDateFrom, setReportDeliveryDateFrom] = useState("");
+  const [reportDeliveryDateTo, setReportDeliveryDateTo] = useState("");
   const [activePage, setActivePage] = useState("dashboard");
   const [notice, setNotice] = useState("");
 
@@ -897,11 +1169,13 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const [adminSaleEditError, setAdminSaleEditError] = useState("");
   const [savingAdminSaleEdit, setSavingAdminSaleEdit] = useState(false);
   const [viewSaleId, setViewSaleId] = useState("");
+  const [customerDetailName, setCustomerDetailName] = useState("");
   const [deliverySaleId, setDeliverySaleId] = useState("");
   const [deliveryDraft, setDeliveryDraft] = useState({});
   const [deliveryError, setDeliveryError] = useState("");
   const [savingDelivery, setSavingDelivery] = useState(false);
   const [tableSort, setTableSort] = useState({});
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     if (!notice) return;
@@ -910,6 +1184,10 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     onError?.(notice);
     setNotice("");
   }, [notice, onError]);
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [activePage]);
 
   const inDateRange = (iso, from, to) => {
     const day = String(iso || "").slice(0, 10);
@@ -1064,14 +1342,25 @@ const AdminView = ({ state, dashboard, message, onError }) => {
           returnedByProduct.set(line.productId, (returnedByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
         }
       }
+      const deliveredByProduct = new Map();
+      for (const sale of state.sales) {
+        if (!inDateRange(sale.createdAt, loadingDateFrom, loadingDateTo)) continue;
+        if (sale.lorry !== lorryName) continue;
+        if (!sale.deliveryConfirmedAt) continue;
+        for (const line of (sale.lines || [])) {
+          const lineKey = line.productId || line.name;
+          deliveredByProduct.set(lineKey, (deliveredByProduct.get(lineKey) || 0) + Number(line.quantity || 0));
+        }
+      }
       return [...map.values()]
         .map((row) => {
           const bundleSize = getBundleSize(row);
           const bundles = bundleSize ? Math.floor(row.qty / bundleSize) : 0;
           const balance = bundleSize ? row.qty % bundleSize : row.qty;
+          const deliveredRaw = Number(deliveredByProduct.get(row.key) || 0);
           const returned = Number(returnedByProduct.get(row.key) || 0);
-          const deliveredQty = Math.max(0, row.qty - returned);
-          const deliveredValue = row.qty > 0 ? (row.value * (deliveredQty / row.qty)) : 0;
+          const deliveredQty = Math.max(0, deliveredRaw - returned);
+          const deliveredValue = row.qty > 0 ? (row.value * (Math.min(deliveredQty, row.qty) / row.qty)) : 0;
           return { ...row, bundleSize, bundles, balance, orderedQty: row.qty, orderedValue: row.value, deliveredQty, deliveredValue };
         })
         .sort((a, b) => b.orderedQty - a.orderedQty);
@@ -1086,9 +1375,10 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const salesWiseRows = useMemo(() => {
     return reportSales.map((sale) => ({
       id: sale.id,
-      when: new Date(sale.createdAt).toLocaleString(),
+      when: new Date(sale.createdAt).toLocaleDateString(),
       whenTs: new Date(sale.createdAt).getTime(),
-      rep: sale.cashier || "Unknown",
+      rep: sale.cashier || "-",
+      lorry: sale.lorry || "-",
       total: Number(sale.total || 0),
       raw: sale
     }));
@@ -1148,6 +1438,58 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     }),
     [filteredCustomerRows, tableSort]
   );
+  const customerPageSummary = useMemo(() => {
+    const rows = sortedCustomerRows || [];
+    const totalCustomers = rows.length;
+    let totalOrders = 0;
+    let totalSpent = 0;
+    let totalOutstanding = 0;
+    let activeCustomers = 0;
+    let customersWithOutstanding = 0;
+    let topCustomer = null;
+    for (const row of rows) {
+      const orders = Number(row.orders || 0);
+      const spent = Number(row.spent || 0);
+      const outstanding = Number(row.outstanding || 0);
+      totalOrders += orders;
+      totalSpent += spent;
+      totalOutstanding += outstanding;
+      if (orders > 0) activeCustomers += 1;
+      if (outstanding > 0) customersWithOutstanding += 1;
+      if (!topCustomer || spent > Number(topCustomer.spent || 0)) topCustomer = row;
+    }
+    return {
+      totalCustomers,
+      activeCustomers,
+      customersWithOutstanding,
+      totalOrders,
+      totalSpent: Number(totalSpent.toFixed(2)),
+      totalOutstanding: Number(totalOutstanding.toFixed(2)),
+      averageOrderValue: totalOrders > 0 ? Number((totalSpent / totalOrders).toFixed(2)) : 0,
+      topCustomerName: topCustomer?.name || "-",
+      topCustomerSpent: Number(topCustomer?.spent || 0)
+    };
+  }, [sortedCustomerRows]);
+  const customerDetailData = useMemo(() => {
+    const key = String(customerDetailName || "").trim().toLowerCase();
+    if (!key) return null;
+    const row = customerRows.find((item) => String(item.name || "").trim().toLowerCase() === key);
+    if (!row) return null;
+    const sales = (state.sales || [])
+      .filter((sale) => String(sale.customerName || "").trim().toLowerCase() === key)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    const totalBills = sales.length;
+    const totalQty = sales.reduce((acc, sale) => acc + (sale.lines || []).reduce((lineAcc, line) => lineAcc + Number(line.quantity || 0), 0), 0);
+    const averageBillValue = totalBills ? Number((Number(row.spent || 0) / totalBills).toFixed(2)) : 0;
+    return {
+      row,
+      totalBills,
+      totalQty,
+      averageBillValue,
+      lastSaleAt: sales[0]?.createdAt || "",
+      recentSales: sales.slice(0, 4)
+    };
+  }, [customerDetailName, customerRows, state.sales]);
 
   const stockRows = useMemo(() => {
     return [...state.products].sort((a, b) => a.stock - b.stock);
@@ -1223,6 +1565,28 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     }),
     [staffRows, tableSort]
   );
+  const staffPageSummary = useMemo(() => {
+    const rows = sortedStaffRows || [];
+    const totalStaff = rows.length;
+    const activeStaff = rows.filter((row) => Number(row.orders || 0) > 0).length;
+    const totalOrders = rows.reduce((acc, row) => acc + Number(row.orders || 0), 0);
+    const totalRevenue = Number(rows.reduce((acc, row) => acc + Number(row.revenue || 0), 0).toFixed(2));
+    const avgRevenuePerStaff = totalStaff ? Number((totalRevenue / totalStaff).toFixed(2)) : 0;
+    const topPerformer = rows.reduce(
+      (best, row) => (Number(row.revenue || 0) > Number(best?.revenue || -1) ? row : best),
+      null
+    );
+    return {
+      totalStaff,
+      activeStaff,
+      totalOrders,
+      totalRevenue,
+      avgRevenuePerStaff,
+      topPerformerName: topPerformer?.name || "-",
+      topPerformerOrders: Number(topPerformer?.orders || 0),
+      topPerformerRevenue: Number(topPerformer?.revenue || 0)
+    };
+  }, [sortedStaffRows]);
 
   const sortedItemWiseRows = useMemo(
     () => sortRows(itemWiseRows, "itemWise", "name", {
@@ -1245,7 +1609,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     () => sortRows(salesWiseRows, "salesWise", "when", {
       id: (row) => Number(row.id || 0),
       when: (row) => Number(row.whenTs || 0),
-      rep: (row) => row.rep || "",
+      lorry: (row) => String(row.lorry || ""),
       total: (row) => Number(row.total || 0)
     }),
     [salesWiseRows, tableSort]
@@ -1272,7 +1636,9 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       orderedQty: (row) => Number(row.orderedQty || 0),
       orderedValue: (row) => Number(row.orderedValue || 0),
       deliveredQty: (row) => Number(row.deliveredQty || 0),
-      deliveredValue: (row) => Number(row.deliveredValue || 0)
+      deliveredValue: (row) => Number(row.deliveredValue || 0),
+      bundles: (row) => Number(row.bundles || 0),
+      singles: (row) => Number(row.balance || 0)
     }),
     [loadingRowsByLorry, tableSort]
   );
@@ -1283,7 +1649,9 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       orderedQty: (row) => Number(row.orderedQty || 0),
       orderedValue: (row) => Number(row.orderedValue || 0),
       deliveredQty: (row) => Number(row.deliveredQty || 0),
-      deliveredValue: (row) => Number(row.deliveredValue || 0)
+      deliveredValue: (row) => Number(row.deliveredValue || 0),
+      bundles: (row) => Number(row.bundles || 0),
+      singles: (row) => Number(row.balance || 0)
     }),
     [loadingRowsByLorry, tableSort]
   );
@@ -1389,6 +1757,69 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     ),
     value: Number(deliveryReportSales.reduce((acc, sale) => acc + Number(sale.total || 0), 0).toFixed(2))
   }), [deliveryReportSales]);
+
+  const reportDeliverySales = useMemo(
+    () => (state.sales || [])
+      .filter((sale) => inDateRange(sale.createdAt, reportDeliveryDateFrom, reportDeliveryDateTo))
+      .filter((sale) => (reportDeliveryLorry === "all" ? true : sale.lorry === reportDeliveryLorry)),
+    [state.sales, reportDeliveryDateFrom, reportDeliveryDateTo, reportDeliveryLorry]
+  );
+
+  const reportDeliveryRows = useMemo(() => {
+    const rows = reportDeliverySales.map((sale) => {
+      const soldQty = (sale.lines || []).reduce((acc, line) => acc + Number(line.quantity || 0), 0);
+      const undeliveredByProduct = new Map();
+      for (const adj of (sale.deliveryAdjustments || [])) {
+        for (const line of (adj.lines || [])) {
+          undeliveredByProduct.set(line.productId, (undeliveredByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
+        }
+      }
+      let undeliveredQty = 0;
+      let deliveredQty = 0;
+      let deliveredValue = 0;
+      for (const line of (sale.lines || [])) {
+        const sold = Number(line.quantity || 0);
+        const undelivered = Math.max(0, Number(undeliveredByProduct.get(line.productId) || 0));
+        const delivered = Math.max(0, sold - undelivered);
+        undeliveredQty += undelivered;
+        deliveredQty += delivered;
+        deliveredValue += delivered * Number(line.price || 0);
+      }
+      return {
+        id: sale.id,
+        date: sale.createdAt ? new Date(sale.createdAt).toLocaleDateString() : "-",
+        rep: sale.cashier || "-",
+        lorry: sale.lorry || "-",
+        status: sale.deliveryConfirmedAt ? "Confirmed" : "Pending",
+        soldQty,
+        undeliveredQty,
+        deliveredQty,
+        deliveredValue: Number(deliveredValue.toFixed(2))
+      };
+    });
+    return rows.sort((a, b) => Number(b.id) - Number(a.id));
+  }, [reportDeliverySales]);
+
+  const reportDeliverySummary = useMemo(() => {
+    const totalBills = reportDeliveryRows.length;
+    const confirmedBills = reportDeliveryRows.filter((row) => row.status === "Confirmed").length;
+    const pendingBills = totalBills - confirmedBills;
+    const soldQtyTotal = reportDeliveryRows.reduce((acc, row) => acc + Number(row.soldQty || 0), 0);
+    const undeliveredQtyTotal = reportDeliveryRows.reduce((acc, row) => acc + Number(row.undeliveredQty || 0), 0);
+    const deliveredQtyTotal = reportDeliveryRows.reduce((acc, row) => acc + Number(row.deliveredQty || 0), 0);
+    const deliveredValueTotal = Number(reportDeliveryRows.reduce((acc, row) => acc + Number(row.deliveredValue || 0), 0).toFixed(2));
+    const deliveryRate = soldQtyTotal > 0 ? Number(((deliveredQtyTotal / soldQtyTotal) * 100).toFixed(1)) : 0;
+    return {
+      totalBills,
+      confirmedBills,
+      pendingBills,
+      soldQtyTotal,
+      undeliveredQtyTotal,
+      deliveredQtyTotal,
+      deliveredValueTotal,
+      deliveryRate
+    };
+  }, [reportDeliveryRows]);
 
   const viewedSale = useMemo(
     () => (state.sales || []).find((sale) => String(sale.id) === String(viewSaleId)) || null,
@@ -1509,6 +1940,22 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     setShowCustomerForm(true);
   };
 
+  const openCustomerEditByRow = (row) => {
+    if (!row) return;
+    const matched = (state.customers || []).find((item) => String(item.name || "").trim().toLowerCase() === String(row.name || "").trim().toLowerCase());
+    if (!matched) {
+      setNotice("Selected customer was not found in saved list.");
+      return;
+    }
+    setCustomerForm({
+      id: matched.id,
+      name: matched.name || row.name || "",
+      phone: matched.phone || row.phone || "",
+      address: matched.address || row.address || ""
+    });
+    setShowCustomerForm(true);
+  };
+
   const saveCustomer = () => {
     if (!customerForm.name.trim()) {
       setNotice("Customer name is required.");
@@ -1529,13 +1976,21 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     setShowStaffForm(true);
   };
 
-  const openStaffEdit = () => {
-    const first = (state.staff || [])[0];
-    if (!first) {
-      setNotice("No staff to edit.");
+  const openStaffEditByRow = (row) => {
+    if (!row) return;
+    const matched = (state.staff || []).find(
+      (item) => String(item.name || "").trim().toLowerCase() === String(row.name || "").trim().toLowerCase()
+    );
+    if (!matched) {
+      setNotice("Selected staff was not found in saved staff list.");
       return;
     }
-    setStaffForm({ id: first.id, name: first.name, role: first.role || "", phone: first.phone || "" });
+    setStaffForm({
+      id: matched.id,
+      name: matched.name || row.name || "",
+      role: matched.role || row.role || "",
+      phone: matched.phone || row.phone || ""
+    });
     setShowStaffForm(true);
   };
 
@@ -1793,7 +2248,32 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       {message && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(message)) ? <p className="notice">{message}</p> : null}
       {notice && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(notice)) ? <p className="notice">{notice}</p> : null}
       <main className="admin-shell">
-        <aside className="admin-sidebar">
+        <button
+          type="button"
+          className={`admin-mobile-nav-toggle menu-toggle-btn ${mobileNavOpen ? "open" : ""}`}
+          onClick={() => setMobileNavOpen((current) => !current)}
+          aria-expanded={mobileNavOpen}
+          aria-controls="admin-sidebar-nav"
+          aria-label={mobileNavOpen ? "Close menu" : "Open menu"}
+        >
+          <span className="menu-toggle-icon" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          <span className="menu-toggle-label">{mobileNavOpen ? "Close" : "Menu"}</span>
+        </button>
+
+        {mobileNavOpen ? (
+          <button
+            type="button"
+            className="admin-mobile-nav-backdrop"
+            onClick={() => setMobileNavOpen(false)}
+            aria-label="Close menu"
+          />
+        ) : null}
+
+        <aside id="admin-sidebar-nav" className={`admin-sidebar ${mobileNavOpen ? "open" : ""}`}>
           {navItems.map((item) => (
             <button
               key={item.id}
@@ -1804,58 +2284,119 @@ const AdminView = ({ state, dashboard, message, onError }) => {
               {item.label}
             </button>
           ))}
+          <div className="side-menu-footer">
+            <a href="https://www.jnco.tech" target="_blank" rel="noreferrer">
+              <img src="/powered.png" alt="Powered by" />
+            </a>
+          </div>
         </aside>
 
         <section className="admin-content">
           {activePage === "customers" ? (
-            <section className="admin-mobile-section">
-              <h2>Customers</h2>
-              <div className="admin-page-actions">
-                <button type="button" onClick={openCustomerAdd}>Add Customer</button>
-                <button type="button" onClick={openCustomerEdit}>Edit Customer</button>
+            <section className="admin-mobile-section admin-customers-panel">
+              <div className="customers-head">
+                <h2>Customers</h2>
+                <button type="button" className="customer-add-icon-btn" onClick={openCustomerAdd} title="Add Customer" aria-label="Add Customer">
+                  <span className="fab-plus">+</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="8" r="4" />
+                    <path d="M4 20c0-4.5 3.6-8 8-8s8 3.5 8 8" />
+                  </svg>
+                </button>
               </div>
               <input
+                className="customers-search search-icon-input"
                 value={customerPanelSearch}
                 onChange={(e) => setCustomerPanelSearch(e.target.value)}
-                placeholder="Search customer / phone / address"
+                placeholder="Search Customer"
               />
-              {showCustomerForm ? (
-                <div className="admin-inline-form">
-                  <input value={customerForm.name} onChange={(e) => setCustomerForm((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name" />
-                  <input value={customerForm.phone} onChange={(e) => setCustomerForm((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone" />
-                  <input value={customerForm.address} onChange={(e) => setCustomerForm((c) => ({ ...c, address: e.target.value }))} placeholder="Address" />
-                  <div>
-                    <button type="button" onClick={saveCustomer}>Save</button>
-                    <button type="button" className="ghost" onClick={() => setShowCustomerForm(false)}>Cancel</button>
-                  </div>
+              <div className="admin-table customer-table customers-table">
+                <div className="customers-table-divider">
+                  <span>CUSTOMERS TABLE</span>
                 </div>
-              ) : null}
-              <div className="admin-table customer-table">
                 <header>
                   <button type="button" className="th-sort" onClick={() => toggleSort("customers", "name")}>Name{sortMark("customers", "name")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("customers", "phone")}>Phone{sortMark("customers", "phone")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("customers", "orders")}>Orders{sortMark("customers", "orders")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("customers", "spent")}>Total Spent{sortMark("customers", "spent")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("customers", "outstanding")}>Outstanding{sortMark("customers", "outstanding")}</button>
-                </header>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "orders")}>Orders{sortMark("customers", "orders")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "spent")}>Total Spent (LKR){sortMark("customers", "spent")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "outstanding")}>Outstanding (LKR){sortMark("customers", "outstanding")}</button>
+                  </header>
                 {sortedCustomerRows.length ? sortedCustomerRows.map((row) => (
-                  <article key={row.name}>
+                  <article
+                    key={row.name}
+                    className="customers-clickable-row"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setCustomerDetailName(row.name)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setCustomerDetailName(row.name);
+                      }
+                    }}
+                  >
                     <span>{row.name}</span>
                     <span>{row.phone || "-"}</span>
                     <span>{row.orders}</span>
-                    <span>{currency(row.spent)}</span>
-                    <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{currency(row.outstanding || 0)}</span>
+                    <span>{Number(row.spent || 0).toFixed(2)}</span>
+                    <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{Number(row.outstanding || 0).toFixed(2)}</span>
                   </article>
                 )) : <p>No customer records yet.</p>}
               </div>
+              <section className="customers-summary-card">
+                <div className="customers-summary-divider">
+                  <span>SUMMARY</span>
+                </div>
+                <div className="customers-summary-head">
+                  <h3>Customer Summary</h3>
+                  <p>Based on current list</p>
+                </div>
+                <div className="customers-summary-grid">
+                  <article>
+                    <span>Total Customers</span>
+                    <strong>{customerPageSummary.totalCustomers}</strong>
+                  </article>
+                  <article>
+                    <span>Active Customers</span>
+                    <strong>{customerPageSummary.activeCustomers}</strong>
+                  </article>
+                  <article>
+                    <span>Customers with Outstanding</span>
+                    <strong>{customerPageSummary.customersWithOutstanding}</strong>
+                  </article>
+                  <article>
+                    <span>Total Orders</span>
+                    <strong>{customerPageSummary.totalOrders}</strong>
+                  </article>
+                  <article>
+                    <span>Total Spent (LKR)</span>
+                    <strong>{Number(customerPageSummary.totalSpent || 0).toFixed(2)}</strong>
+                  </article>
+                  <article className="warn">
+                    <span>Total Outstanding (LKR)</span>
+                    <strong>{Number(customerPageSummary.totalOutstanding || 0).toFixed(2)}</strong>
+                  </article>
+                </div>
+                <div className="customers-summary-foot">
+                  <article>
+                    <span>Top Customer</span>
+                    <strong>{customerPageSummary.topCustomerName}</strong>
+                    <p>LKR {Number(customerPageSummary.topCustomerSpent || 0).toFixed(2)}</p>
+                  </article>
+                  <article>
+                    <span>Average Order Value</span>
+                    <strong>LKR {Number(customerPageSummary.averageOrderValue || 0).toFixed(2)}</strong>
+                  </article>
+                </div>
+              </section>
             </section>
           ) : null}
 
           {activePage === "stock" ? (
-            <section className="admin-mobile-section">
+            <section className="admin-mobile-section admin-stock-panel">
               <h2>Stock</h2>
               {showStockForm ? (
-                <div className="admin-inline-form">
+                <div className="admin-inline-form stock-form-panel">
                   {stockMode === "add" ? (
                     <>
                       <input
@@ -1915,7 +2456,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
               ) : null}
               <div className="stock-current-head">
                 <h3>Current Stock</h3>
-                <div className="admin-page-actions stock-current-actions">
+                <div className="admin-page-actions stock-current-actions stock-actions-tech">
                   <button type="button" onClick={openStockAdd}>Add Stock</button>
                   <button type="button" onClick={openStockEdit}>Edit Stock</button>
                   <button type="button" onClick={() => stockFileRef.current?.click()}>Import Stock</button>
@@ -1929,27 +2470,24 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 </div>
               </div>
               <input
+                className="admin-search-input stock-search-input search-icon-input"
                 value={stockPanelSearch}
                 onChange={(e) => setStockPanelSearch(e.target.value)}
                 placeholder="Search product / SKU / size"
               />
-              <div className="admin-table stock-table">
+              <div className="admin-table stock-table stock-table-tech">
                 <header>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "name")}>Product{sortMark("stock", "name")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "size")}>Size{sortMark("stock", "size")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("stock", "sku")}>SKU{sortMark("stock", "sku")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "billingPrice")}>Billing Price{sortMark("stock", "billingPrice")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "mrp")}>MRP{sortMark("stock", "mrp")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "billingPrice")}>Billing Price (LKR){sortMark("stock", "billingPrice")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "mrp")}>MRP (LKR){sortMark("stock", "mrp")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("stock", "stock")}>Stock{sortMark("stock", "stock")}</button>
                   <span className="th-action">Action</span>
                 </header>
                 {sortedStockRows.map((item) => (
                   <article key={item.id}>
-                    <span>{item.name}</span>
-                    <span>{item.size || "-"}</span>
                     <span>{item.sku}</span>
-                    <span>{currency(item.billingPrice ?? item.price ?? 0)}</span>
-                    <span>{currency(item.mrp ?? item.price ?? 0)}</span>
+                    <span>{Number(item.billingPrice ?? item.price ?? 0).toFixed(2)}</span>
+                    <span>{Number(item.mrp ?? item.price ?? 0).toFixed(2)}</span>
                     <span className={item.stock <= 25 ? "low" : ""}>{item.stock}</span>
                     <span className="action-cell">
                       <button type="button" className="row-danger" onClick={() => deleteStockProductById(item)} disabled={deletingProduct}>
@@ -1959,7 +2497,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </article>
                 ))}
               </div>
-              <div className="returned-stock-panel">
+              <div className="returned-stock-panel returned-stock-tech">
                 <h3>Returned Stock</h3>
                 <div className="admin-table returns-table">
                   <header>
@@ -1985,10 +2523,11 @@ const AdminView = ({ state, dashboard, message, onError }) => {
 
           {activePage === "staff" ? (
             <section className="admin-mobile-section">
-              <h2>Staff</h2>
-              <div className="admin-page-actions">
-                <button type="button" onClick={openStaffAdd}>Add Staff</button>
-                <button type="button" onClick={openStaffEdit}>Edit Staff</button>
+              <div className="staff-head">
+                <h2>Staff</h2>
+                <div className="staff-head-actions">
+                  <button type="button" onClick={openStaffAdd}>Add Staff</button>
+                </div>
               </div>
               {showStaffForm ? (
                 <div className="admin-inline-form">
@@ -2009,7 +2548,19 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   <button type="button" className="th-sort" onClick={() => toggleSort("staff", "revenue")}>Revenue{sortMark("staff", "revenue")}</button>
                 </header>
                 {sortedStaffRows.length ? sortedStaffRows.map((row) => (
-                  <article key={row.name}>
+                  <article
+                    key={row.name}
+                    className="staff-clickable-row"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openStaffEditByRow(row)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openStaffEditByRow(row);
+                      }
+                    }}
+                  >
                     <span>{row.name}</span>
                     <span>{row.role || "-"}</span>
                     <span>{row.orders}</span>
@@ -2017,11 +2568,45 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </article>
                 )) : <p>No staff sales records yet.</p>}
               </div>
+              <div className="staff-summary-divider">
+                <span>STAFF SUMMARY</span>
+              </div>
+              <section className="staff-summary-card">
+                <div className="staff-summary-top">
+                  <article>
+                    <span>Total Staff</span>
+                    <strong>{staffPageSummary.totalStaff}</strong>
+                  </article>
+                  <article>
+                    <span>Active Staff</span>
+                    <strong>{staffPageSummary.activeStaff}</strong>
+                  </article>
+                  <article>
+                    <span>Total Orders</span>
+                    <strong>{staffPageSummary.totalOrders}</strong>
+                  </article>
+                  <article>
+                    <span>Total Revenue (LKR)</span>
+                    <strong>{staffPageSummary.totalRevenue.toFixed(2)}</strong>
+                  </article>
+                </div>
+                <div className="staff-summary-bottom">
+                  <article>
+                    <span>Avg Revenue / Staff (LKR)</span>
+                    <strong>{staffPageSummary.avgRevenuePerStaff.toFixed(2)}</strong>
+                  </article>
+                  <article className="staff-summary-highlight">
+                    <span>Top Performer</span>
+                    <strong>{staffPageSummary.topPerformerName}</strong>
+                    <p>{staffPageSummary.topPerformerOrders} orders • {currency(staffPageSummary.topPerformerRevenue)}</p>
+                  </article>
+                </div>
+              </section>
             </section>
           ) : null}
 
           {activePage === "deliveries" ? (
-            <section className="admin-mobile-section">
+            <section className="admin-mobile-section deliveries-page">
               <h2>Deliveries</h2>
               <div className="rep-date-filters">
                 <select value={deliveryLorry} onChange={(e) => setDeliveryLorry(e.target.value)}>
@@ -2040,27 +2625,30 @@ const AdminView = ({ state, dashboard, message, onError }) => {
               </div>
               <div className="admin-table deliveries-table">
                 <header>
-                  <span>Sale ID</span>
-                  <span>Date/Time</span>
-                  <span>Rep</span>
-                  <span>Lorry</span>
-                  <span>Total</span>
-                  <span>Status</span>
-                  <span className="th-action">Action</span>
+                  <span className="delivery-col-id">Sale ID</span>
+                  <span className="delivery-col-date">Date/Time</span>
+                  <span className="delivery-col-rep">Rep</span>
+                  <span className="delivery-col-lorry">Lorry</span>
+                  <span className="delivery-col-total">Total (LKR)</span>
+                  <span className="delivery-col-status">Status</span>
+                  <span className="th-action delivery-col-action">Action</span>
                 </header>
                 {deliveryRows.length ? deliveryRows.map((row) => (
                   <article key={`d-${row.id}`}>
-                    <span>#{row.id}</span>
-                    <span className="delivery-cell-date">{row.when}</span>
-                    <span>{row.rep}</span>
-                    <span>{row.lorry}</span>
-                    <span>{currency(row.total)}</span>
-                    <span>
+                    <span className="delivery-col-id delivery-sale-cell">
+                      <strong className="delivery-sale-id">#{row.id}</strong>
+                      <small className="delivery-sale-meta">{row.when} • {row.rep}</small>
+                    </span>
+                    <span className="delivery-col-date delivery-cell-date">{row.when}</span>
+                    <span className="delivery-col-rep">{row.rep}</span>
+                    <span className="delivery-col-lorry">{row.lorry}</span>
+                    <span className="delivery-col-total">{Number(row.total || 0).toFixed(2)}</span>
+                    <span className="delivery-col-status">
                       <span className={row.confirmed ? "delivery-status confirmed" : "delivery-status pending"}>
                         {row.confirmed ? "Confirmed" : "Pending"}
                       </span>
                     </span>
-                    <span className="action-cell">
+                    <span className="action-cell delivery-col-action">
                       <button type="button" className="delivery-action-btn" onClick={() => openDeliveryModal(row.sale)}>
                         {row.confirmed ? "Update" : "Confirm"}
                       </button>
@@ -2068,7 +2656,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </article>
                 )) : <p>No delivery bills found for selected filters.</p>}
               </div>
-              <div className="report-head" style={{ marginTop: "0.65rem" }}>
+              <div className="report-head deliveries-report-head" style={{ marginTop: "0.65rem" }}>
                 <h3>Delivered Items Report</h3>
               </div>
               <div className="rep-date-filters">
@@ -2119,8 +2707,8 @@ const AdminView = ({ state, dashboard, message, onError }) => {
           ) : null}
 
           {activePage === "dashboard" ? (
-            <div className="admin-mobile">
-              <section className="admin-mobile-section">
+            <div className="admin-mobile admin-dashboard">
+              <section className="admin-mobile-section dashboard-snapshot-panel">
                 <h2>Admin Snapshot</h2>
                 <div className="snapshot-layout">
                   <div className="snapshot-grid">
@@ -2136,7 +2724,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 </div>
               </section>
 
-              <section className="admin-mobile-section">
+              <section className="admin-mobile-section sales-day-panel dashboard-chart-panel">
                 <h2>Sales Chart by Day</h2>
                 <div className="rep-date-filters">
                   <label className="rep-date-field">
@@ -2155,14 +2743,14 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                       <div className="bar-wrap">
                         <div className="bar" style={{ height: `${(item.count / maxCount) * 100}%` }} />
                       </div>
-                      <div className="bar-meta">{currency(item.revenue)}</div>
+                      <div className="bar-meta">{Number(item.revenue || 0).toFixed(2)}</div>
                       <div className="bar-label">{item.short}</div>
                     </div>
                   ))}
                 </div>
               </section>
 
-              <section className="admin-mobile-section">
+              <section className="admin-mobile-section rep-chart-panel dashboard-chart-panel">
                 <div className="chart-title-row rep-title-row">
                   <h2 className="rep-chart-title">Sales Chart by Rep</h2>
                   <div className="rep-search rep-search-wide">
@@ -2204,8 +2792,8 @@ const AdminView = ({ state, dashboard, message, onError }) => {
           ) : null}
 
           {activePage === "reports" ? (
-            <div className="admin-mobile">
-              <section className="admin-mobile-section">
+            <div className="admin-mobile admin-reports">
+              <section className="admin-mobile-section report-panel report-itemwise-panel">
                 <div className="report-head">
                   <h2>Item Wise Report</h2>
                   <select value={itemReportLorry} onChange={(e) => setItemReportLorry(e.target.value)}>
@@ -2244,7 +2832,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 </div>
               </section>
 
-              <section className="admin-mobile-section">
+              <section className="admin-mobile-section report-panel report-saleswise-panel">
                 <h2>Sales Wise Report</h2>
                 <div className="rep-date-filters">
                   <label className="rep-date-field">
@@ -2256,26 +2844,32 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                     <input type="date" value={salesDateTo} onChange={(e) => setSalesDateTo(e.target.value)} />
                   </label>
                 </div>
-                <p className="form-hint">Selected range total sale value: <strong>{currency(salesRangeTotal)}</strong></p>
+                <div className="sales-range-kpi">
+                  <span className="sales-range-kpi-label">Selected Range Total Sale Value</span>
+                  <strong className="sales-range-kpi-value">{currency(salesRangeTotal)}</strong>
+                </div>
                 <div className="admin-table sales-wise-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "id")}>Sale ID{sortMark("salesWise", "id")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "when")}>Date/Time{sortMark("salesWise", "when")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "rep")}>Rep{sortMark("salesWise", "rep")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "total")}>Total{sortMark("salesWise", "total")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "when")}>Date{sortMark("salesWise", "when")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "lorry")}>Lorry{sortMark("salesWise", "lorry")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "total")}>Total<br />(LKR){sortMark("salesWise", "total")}</button>
                     <span className="th-action">Actions</span>
                   </header>
                   {sortedSalesWiseRows.length ? sortedSalesWiseRows.slice(0, 50).map((row) => (
                     <article key={row.id}>
-                      <span>#{row.id}</span>
+                      <span className="sales-id-cell">
+                        <strong>#{row.id}</strong>
+                        <small>{row.rep}</small>
+                      </span>
                       <span>{row.when}</span>
-                      <span>{row.rep}</span>
-                      <span>{currency(row.total)}</span>
+                      <span>{row.lorry}</span>
+                      <span>{Number(row.total || 0).toFixed(2)}</span>
                       <span className="action-cell">
                         <button type="button" className="ghost" onClick={() => setViewSaleId(String(row.id))}>View</button>
                         <button type="button" className="ghost" onClick={() => openAdminSaleEdit(row.raw)}>Edit</button>
                         <button type="button" className="row-danger" onClick={() => deleteAdminSale(row.raw)} disabled={deletingSaleId === String(row.id)}>
-                          {deletingSaleId === String(row.id) ? "Deleting..." : "Delete"}
+                          {deletingSaleId === String(row.id) ? "..." : "🗑"}
                         </button>
                       </span>
                     </article>
@@ -2283,36 +2877,135 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 </div>
               </section>
 
-              <section className="admin-mobile-section">
+              <section className="admin-mobile-section report-panel report-customerwise-panel">
                 <h2>Customer Wise Report</h2>
-                <input
-                  value={customerReportSearch}
-                  onChange={(e) => setCustomerReportSearch(e.target.value)}
-                  placeholder="Search customer"
-                />
-                <div className="admin-table">
+                <div className="admin-table customer-wise-report-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "name")}>Customer{sortMark("customerWise", "name")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "orders")}>Orders{sortMark("customerWise", "orders")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "spent")}>Total Spent{sortMark("customerWise", "spent")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "spent")}>Total Spent (LKR){sortMark("customerWise", "spent")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "lastAt")}>Last Purchase{sortMark("customerWise", "lastAt")}</button>
                   </header>
-                  {sortedCustomerWiseRows.length ? sortedCustomerWiseRows.map((row) => (
-                    <article key={row.name}>
-                      <span>{row.name}</span>
-                      <span>{row.orders}</span>
-                      <span>{currency(row.spent)}</span>
-                      <span>{row.lastAt ? new Date(row.lastAt).toLocaleDateString() : "-"}</span>
+                {sortedCustomerWiseRows.length ? sortedCustomerWiseRows.map((row) => (
+                  <article key={row.name}>
+                    <span>{row.name}</span>
+                    <span>{row.orders}</span>
+                    <span>{Number(row.spent || 0).toFixed(2)}</span>
+                    <span>{row.lastAt ? new Date(row.lastAt).toLocaleDateString() : "-"}</span>
+                  </article>
+                )) : <p>No customer-wise records yet.</p>}
+              </div>
+                <section className="customers-summary-card">
+                  <div className="customers-summary-divider">
+                    <span>SUMMARY</span>
+                  </div>
+                  <div className="customers-summary-head">
+                    <h3>Customer Snapshot</h3>
+                    <p>Live from filtered customer records</p>
+                  </div>
+                  <div className="customers-summary-grid">
+                    <article>
+                      <span>Total Customers</span>
+                      <strong>{customerPageSummary.totalCustomers}</strong>
                     </article>
-                  )) : <p>No customer-wise records yet.</p>}
+                    <article>
+                      <span>Active Customers</span>
+                      <strong>{customerPageSummary.activeCustomers}</strong>
+                    </article>
+                    <article className="warn">
+                      <span>With Outstanding</span>
+                      <strong>{customerPageSummary.customersWithOutstanding}</strong>
+                    </article>
+                  </div>
+                  <div className="customers-summary-foot">
+                    <article>
+                      <span>Total Orders</span>
+                      <strong>{customerPageSummary.totalOrders}</strong>
+                      <p>Avg order value: {currency(customerPageSummary.averageOrderValue)}</p>
+                    </article>
+                    <article>
+                      <span>Total Spent</span>
+                      <strong>{currency(customerPageSummary.totalSpent)}</strong>
+                      <p className="outstanding-text">Outstanding: {currency(customerPageSummary.totalOutstanding)}</p>
+                    </article>
+                    <article>
+                      <span>Top Customer</span>
+                      <strong>{customerPageSummary.topCustomerName}</strong>
+                      <p>{currency(customerPageSummary.topCustomerSpent)}</p>
+                    </article>
+                  </div>
+                </section>
+              </section>
+
+              <section className="admin-mobile-section report-panel report-delivery-panel">
+                <div className="delivery-report-divider">
+                  <span>DELIVERY INTELLIGENCE</span>
+                </div>
+                <div className="report-head">
+                  <h2>Delivery Report</h2>
+                  <select value={reportDeliveryLorry} onChange={(e) => setReportDeliveryLorry(e.target.value)}>
+                    <option value="all">All Lorries</option>
+                    <option value="Lorry A">Lorry A</option>
+                    <option value="Lorry B">Lorry B</option>
+                  </select>
+                </div>
+                <div className="rep-date-filters">
+                  <label className="rep-date-field">
+                    <span>From</span>
+                    <input type="date" value={reportDeliveryDateFrom} onChange={(e) => setReportDeliveryDateFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To</span>
+                    <input type="date" value={reportDeliveryDateTo} onChange={(e) => setReportDeliveryDateTo(e.target.value)} />
+                  </label>
+                </div>
+                <div className="delivery-report-kpi-grid">
+                  <article><span>Total Bills</span><strong>{reportDeliverySummary.totalBills}</strong></article>
+                  <article><span>Confirmed</span><strong>{reportDeliverySummary.confirmedBills}</strong></article>
+                  <article><span>Pending</span><strong>{reportDeliverySummary.pendingBills}</strong></article>
+                  <article><span>Sold Qty</span><strong>{reportDeliverySummary.soldQtyTotal}</strong></article>
+                  <article><span>Delivered Qty</span><strong>{reportDeliverySummary.deliveredQtyTotal}</strong></article>
+                  <article><span>Undelivered Qty</span><strong>{reportDeliverySummary.undeliveredQtyTotal}</strong></article>
+                  <article><span>Delivered Value (LKR)</span><strong>{reportDeliverySummary.deliveredValueTotal.toFixed(2)}</strong></article>
+                  <article><span>Delivery Rate</span><strong>{reportDeliverySummary.deliveryRate}%</strong></article>
+                </div>
+                <div className="admin-table delivery-report-sales-table">
+                  <header>
+                    <span>Sale ID</span>
+                    <span>Date</span>
+                    <span>Rep</span>
+                    <span>Lorry</span>
+                    <span>Status</span>
+                    <span>Sold</span>
+                    <span>ND</span>
+                    <span>Delivered</span>
+                    <span>Value (LKR)</span>
+                  </header>
+                  {reportDeliveryRows.length ? reportDeliveryRows.map((row) => (
+                    <article key={`rdr-${row.id}`}>
+                      <span>#{row.id}</span>
+                      <span>{row.date}</span>
+                      <span>{row.rep}</span>
+                      <span>{row.lorry}</span>
+                      <span>
+                        <span className={row.status === "Confirmed" ? "delivery-status confirmed" : "delivery-status pending"}>
+                          {row.status}
+                        </span>
+                      </span>
+                      <span>{row.soldQty}</span>
+                      <span>{row.undeliveredQty}</span>
+                      <span>{row.deliveredQty}</span>
+                      <span>{row.deliveredValue.toFixed(2)}</span>
+                    </article>
+                  )) : <p>No delivery report records for selected filters.</p>}
                 </div>
               </section>
             </div>
           ) : null}
 
           {activePage === "loadings" ? (
-            <div className="admin-mobile">
-              <section className="admin-mobile-section">
+            <div className="admin-mobile loadings-page">
+              <section className="admin-mobile-section loading-range-panel">
                 <h2>Loading Date Range</h2>
                 <div className="rep-date-filters">
                   <label className="rep-date-field">
@@ -2325,51 +3018,89 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </label>
                 </div>
               </section>
-              <section className="admin-mobile-section">
+              <section className="admin-mobile-section loading-lorry-panel loading-lorry-a">
                 <h2>Lorry A Loading</h2>
-                <p className="form-hint">
-                  Ordered: {loadingSummaryA.orderedQty} / {currency(loadingSummaryA.orderedValue)} • Delivered: {loadingSummaryA.deliveredQty} / {currency(loadingSummaryA.deliveredValue)}
-                </p>
-                <div className="admin-table loading-table">
+                <div className="loading-summary-grid">
+                  <article>
+                    <span>Ordered Qty</span>
+                    <strong>{loadingSummaryA.orderedQty}</strong>
+                  </article>
+                  <article>
+                    <span>Ordered Value</span>
+                    <strong>{currency(loadingSummaryA.orderedValue)}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Qty</span>
+                    <strong>{loadingSummaryA.deliveredQty}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Value</span>
+                    <strong>{currency(loadingSummaryA.deliveredValue)}</strong>
+                  </article>
+                </div>
+                <div className="admin-table loading-table loading-table-a">
                   <header>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "name")}>Item{sortMark("loadingA", "name")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "orderedQty")}>Ordered Qty{sortMark("loadingA", "orderedQty")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "orderedValue")}>Ordered Value{sortMark("loadingA", "orderedValue")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "deliveredQty")}>Delivered Qty{sortMark("loadingA", "deliveredQty")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingA", "deliveredValue")}>Delivered Value{sortMark("loadingA", "deliveredValue")}</button>
+                    <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingA", "name")}>Item{sortMark("loadingA", "name")}</button>
+                    <button type="button" className="th-sort loading-col-ordered-qty" onClick={() => toggleSort("loadingA", "orderedQty")}>Ord Qty{sortMark("loadingA", "orderedQty")}</button>
+                    <button type="button" className="th-sort loading-col-ordered-value" onClick={() => toggleSort("loadingA", "orderedValue")}>Ord Value{sortMark("loadingA", "orderedValue")}</button>
+                    <button type="button" className="th-sort loading-col-bundles" onClick={() => toggleSort("loadingA", "bundles")}>Bundles{sortMark("loadingA", "bundles")}</button>
+                    <button type="button" className="th-sort loading-col-singles" onClick={() => toggleSort("loadingA", "singles")}>Singles{sortMark("loadingA", "singles")}</button>
+                    <button type="button" className="th-sort loading-col-delivered-qty" onClick={() => toggleSort("loadingA", "deliveredQty")}>Del Qty{sortMark("loadingA", "deliveredQty")}</button>
+                    <button type="button" className="th-sort loading-col-delivered-value" onClick={() => toggleSort("loadingA", "deliveredValue")}>Del Value{sortMark("loadingA", "deliveredValue")}</button>
                   </header>
                   {sortedLoadingA.length ? sortedLoadingA.map((row) => (
                     <article key={`a-${row.key}`}>
-                      <span>{row.name}</span>
-                      <span>{row.orderedQty}</span>
-                      <span>{currency(row.orderedValue)}</span>
-                      <span>{row.deliveredQty}</span>
-                      <span>{currency(row.deliveredValue)}</span>
+                      <span className="loading-col-item">{row.name}</span>
+                      <span className="loading-col-ordered-qty">{row.orderedQty}</span>
+                      <span className="loading-col-ordered-value">{currency(row.orderedValue)}</span>
+                      <span className="loading-col-bundles">{row.bundles}</span>
+                      <span className="loading-col-singles">{row.balance}</span>
+                      <span className="loading-col-delivered-qty">{row.deliveredQty}</span>
+                      <span className="loading-col-delivered-value">{currency(row.deliveredValue)}</span>
                     </article>
                   )) : <p>No loading data for Lorry A.</p>}
                 </div>
               </section>
 
-              <section className="admin-mobile-section">
+              <section className="admin-mobile-section loading-lorry-panel loading-lorry-b">
                 <h2>Lorry B Loading</h2>
-                <p className="form-hint">
-                  Ordered: {loadingSummaryB.orderedQty} / {currency(loadingSummaryB.orderedValue)} • Delivered: {loadingSummaryB.deliveredQty} / {currency(loadingSummaryB.deliveredValue)}
-                </p>
-                <div className="admin-table loading-table">
+                <div className="loading-summary-grid">
+                  <article>
+                    <span>Ordered Qty</span>
+                    <strong>{loadingSummaryB.orderedQty}</strong>
+                  </article>
+                  <article>
+                    <span>Ordered Value</span>
+                    <strong>{currency(loadingSummaryB.orderedValue)}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Qty</span>
+                    <strong>{loadingSummaryB.deliveredQty}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Value</span>
+                    <strong>{currency(loadingSummaryB.deliveredValue)}</strong>
+                  </article>
+                </div>
+                <div className="admin-table loading-table loading-table-b">
                   <header>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "name")}>Item{sortMark("loadingB", "name")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "orderedQty")}>Ordered Qty{sortMark("loadingB", "orderedQty")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "orderedValue")}>Ordered Value{sortMark("loadingB", "orderedValue")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "deliveredQty")}>Delivered Qty{sortMark("loadingB", "deliveredQty")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("loadingB", "deliveredValue")}>Delivered Value{sortMark("loadingB", "deliveredValue")}</button>
+                    <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingB", "name")}>Item{sortMark("loadingB", "name")}</button>
+                    <button type="button" className="th-sort loading-col-ordered-qty" onClick={() => toggleSort("loadingB", "orderedQty")}>Ord Qty{sortMark("loadingB", "orderedQty")}</button>
+                    <button type="button" className="th-sort loading-col-ordered-value" onClick={() => toggleSort("loadingB", "orderedValue")}>Ord Value{sortMark("loadingB", "orderedValue")}</button>
+                    <button type="button" className="th-sort loading-col-bundles" onClick={() => toggleSort("loadingB", "bundles")}>Bundles{sortMark("loadingB", "bundles")}</button>
+                    <button type="button" className="th-sort loading-col-singles" onClick={() => toggleSort("loadingB", "singles")}>Singles{sortMark("loadingB", "singles")}</button>
+                    <button type="button" className="th-sort loading-col-delivered-qty" onClick={() => toggleSort("loadingB", "deliveredQty")}>Del Qty{sortMark("loadingB", "deliveredQty")}</button>
+                    <button type="button" className="th-sort loading-col-delivered-value" onClick={() => toggleSort("loadingB", "deliveredValue")}>Del Value{sortMark("loadingB", "deliveredValue")}</button>
                   </header>
                   {sortedLoadingB.length ? sortedLoadingB.map((row) => (
                     <article key={`b-${row.key}`}>
-                      <span>{row.name}</span>
-                      <span>{row.orderedQty}</span>
-                      <span>{currency(row.orderedValue)}</span>
-                      <span>{row.deliveredQty}</span>
-                      <span>{currency(row.deliveredValue)}</span>
+                      <span className="loading-col-item">{row.name}</span>
+                      <span className="loading-col-ordered-qty">{row.orderedQty}</span>
+                      <span className="loading-col-ordered-value">{currency(row.orderedValue)}</span>
+                      <span className="loading-col-bundles">{row.bundles}</span>
+                      <span className="loading-col-singles">{row.balance}</span>
+                      <span className="loading-col-delivered-qty">{row.deliveredQty}</span>
+                      <span className="loading-col-delivered-value">{currency(row.deliveredValue)}</span>
                     </article>
                   )) : <p>No loading data for Lorry B.</p>}
                 </div>
@@ -2378,6 +3109,94 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       ) : null}
         </section>
       </main>
+
+      {showCustomerForm ? (
+        <div className="low-stock-modal" onClick={() => setShowCustomerForm(false)}>
+          <div className="low-stock-modal-card customer-entry-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>{customerForm.id ? "Edit Customer" : "Add Customer"}</h3>
+              <button type="button" onClick={() => setShowCustomerForm(false)}>Close</button>
+            </div>
+            <div className="admin-inline-form customer-entry-grid">
+              <input value={customerForm.name} onChange={(e) => setCustomerForm((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name" />
+              <input value={customerForm.phone} onChange={(e) => setCustomerForm((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone" />
+              <textarea value={customerForm.address} onChange={(e) => setCustomerForm((c) => ({ ...c, address: e.target.value }))} placeholder="Address" />
+              <div className="customer-entry-actions">
+                <button type="button" onClick={saveCustomer}>Save Customer</button>
+                <button type="button" className="ghost" onClick={() => setShowCustomerForm(false)}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {customerDetailData ? (
+        <div className="low-stock-modal" onClick={() => setCustomerDetailName("")}>
+          <div className="low-stock-modal-card customer-detail-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>{customerDetailData.row.name}</h3>
+              <button type="button" onClick={() => setCustomerDetailName("")}>Close</button>
+            </div>
+            <div className="customer-detail-grid">
+              <article>
+                <span>Total Bills</span>
+                <strong>{customerDetailData.totalBills}</strong>
+              </article>
+              <article>
+                <span>Total Spent (LKR)</span>
+                <strong>{Number(customerDetailData.row.spent || 0).toFixed(2)}</strong>
+              </article>
+              <article className={Number(customerDetailData.row.outstanding || 0) > 0 ? "warn" : ""}>
+                <span>Outstanding (LKR)</span>
+                <strong>{Number(customerDetailData.row.outstanding || 0).toFixed(2)}</strong>
+              </article>
+              <article>
+                <span>Total Item Qty</span>
+                <strong>{customerDetailData.totalQty}</strong>
+              </article>
+              <article>
+                <span>Average Bill Value</span>
+                <strong>LKR {Number(customerDetailData.averageBillValue || 0).toFixed(2)}</strong>
+              </article>
+              <article>
+                <span>Last Purchase</span>
+                <strong>{customerDetailData.lastSaleAt ? new Date(customerDetailData.lastSaleAt).toLocaleDateString() : "-"}</strong>
+              </article>
+            </div>
+            <div className="customer-detail-meta">
+              <p><strong>Phone:</strong> {customerDetailData.row.phone || "-"}</p>
+              <p><strong>Address:</strong> {customerDetailData.row.address || "-"}</p>
+            </div>
+            <div className="customer-detail-recent">
+              <h4>Recent Bills</h4>
+              {customerDetailData.recentSales.length ? (
+                <div className="customer-detail-recent-list">
+                  {customerDetailData.recentSales.map((sale) => (
+                    <article key={sale.id}>
+                      <span>#{sale.id}</span>
+                      <span>{new Date(sale.createdAt).toLocaleDateString()}</span>
+                      <strong>{currency(sale.total || 0)}</strong>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="form-hint">No recent sales found.</p>
+              )}
+            </div>
+            <div className="customer-detail-actions">
+              <button
+                type="button"
+                onClick={() => {
+                  openCustomerEditByRow(customerDetailData.row);
+                  setCustomerDetailName("");
+                }}
+              >
+                Edit Customer
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {editingAdminSaleId ? (
         <div className="low-stock-modal" onClick={() => { setEditingAdminSaleId(""); setAdminSaleEditLines([]); setAdminSaleEditError(""); }}>
@@ -2408,10 +3227,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
           <div className="low-stock-modal-card receipt-preview-card" onClick={(e) => e.stopPropagation()}>
             <div className="low-stock-modal-head">
               <h3>Receipt #{viewedSale.id}</h3>
-              <div className="action-cell">
-                <button type="button" onClick={() => printAdminSaleReceipt(viewedSale)}>Print</button>
-                <button type="button" className="ghost" onClick={() => setViewSaleId("")}>Close</button>
-              </div>
+              <button type="button" className="ghost" onClick={() => setViewSaleId("")}>Close</button>
             </div>
             <div className="receipt-preview">
               <h4>M.W.M.B CHANDRASEKARA - MATALE DISTRIBUTOR</h4>
@@ -2420,20 +3236,27 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 <header>
                   <span>Item Code</span>
                   <span>Qty</span>
-                  <span>Price</span>
-                  <span>Total</span>
+                  <span>Price<br />LKR</span>
+                  <span>Item Discount</span>
+                  <span>Total<br />LKR</span>
                 </header>
                 {(viewedSale.lines || []).map((line) => (
                   <article key={`${viewedSale.id}-${line.productId}`}>
                     <span>{line.sku || productInfoById.get(line.productId)?.sku || "-"}</span>
                     <span>{line.quantity}</span>
-                    <span>{currency(line.price)}</span>
-                    <span>{currency(Number(line.price || 0) * Number(line.quantity || 0))}</span>
+                    <span>{Number(line.price || 0).toFixed(2)}</span>
+                    <span>{Number(line.itemDiscount || 0) > 0 ? currency(line.itemDiscount) : "-"}</span>
+                    <span>{Number((Number(line.price || 0) * Number(line.quantity || 0)) || 0).toFixed(2)}</span>
                   </article>
                 ))}
               </div>
-              <p className="form-hint">Discount: {currency(viewedSale.discount || 0)}</p>
-              <p className="form-hint"><strong>Total: {currency(viewedSale.total || 0)}</strong></p>
+              <div className="receipt-summary-row">
+                <div className="receipt-summary-texts">
+                  <p className="form-hint">Discount: {currency(viewedSale.discount || 0)}</p>
+                  <p className="form-hint"><strong>Total: {currency(viewedSale.total || 0)}</strong></p>
+                </div>
+                <button type="button" className="receipt-print-action" onClick={() => printAdminSaleReceipt(viewedSale)}>Print</button>
+              </div>
             </div>
           </div>
         </div>
@@ -2566,7 +3389,7 @@ export const App = () => {
 
   const taxRate = 0;
   const effectiveCartLines = useMemo(
-    () => cart.map((line) => ({ ...line, price: lineFinalPrice(line) })),
+    () => cart.map((line) => ({ ...line, itemDiscount: lineItemDiscount(line), price: lineFinalPrice(line) })),
     [cart]
   );
   const discountAmount = useMemo(() => {
