@@ -26,7 +26,11 @@ import {
   updateStaff
 } from "./api.js";
 
-const currency = (value) => `LKR ${Number(value || 0).toFixed(2)}`;
+const formatLkrValue = (value) => Number(value || 0).toLocaleString("en-US", {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+const currency = (value) => `LKR ${formatLkrValue(value)}`;
 const SESSION_KEY = "pepsi_pos_session";
 const escapeHtml = (value = "") => String(value)
   .replace(/&/g, "&amp;")
@@ -91,7 +95,7 @@ const lineFinalPrice = (line) => Math.max(0, lineBasePrice(line) - Math.max(0, l
 
 const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCustomerName = "", onPopupBlocked = () => {} }) => {
   if (typeof window === "undefined" || !sale) return;
-  const toMoney = (value) => Number(value || 0).toFixed(2);
+  const toMoney = (value) => formatLkrValue(value);
   const saleDate = new Date(sale?.createdAt || Date.now());
   const dateLabel = Number.isNaN(saleDate.getTime())
     ? ""
@@ -101,6 +105,7 @@ const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCus
   const customer = (customers || []).find(
     (row) => String(row?.name || "").trim().toLowerCase() === pickedCustomer.toLowerCase()
   );
+  const printedCustomerPhone = String(sale?.customerPhone || customer?.phone || "-").trim() || "-";
 
   const baseLines = Array.isArray(sale?.lines) ? sale.lines : [];
   const lines = baseLines.slice(0, 12).map((line) => {
@@ -133,9 +138,9 @@ const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCus
 .logo-wrap { display: grid; justify-items: center; gap: 4px; } .logo-wrap img { width: 100px; height: 100px; object-fit: contain; }
 .brand-title { text-align: center; font-weight: 900; font-size: 26px; line-height: 1.05; letter-spacing: 0.4px; text-transform: uppercase; }
 .brand-sub { margin: 10px auto 0; width: fit-content; background: #fff; border-radius: 14px; padding: 8px 20px; font-size: 22px; font-weight: 700; }
-.meta { margin-top: 12px; border: 1px solid #1f2937; border-radius: 16px; padding: 8px 10px; display: grid; grid-template-columns: 64px 1fr; gap: 10px; align-items: center; }
-.meta-box { border: 1px solid #1f2937; height: 90px; } .meta-grid { display: grid; grid-template-columns: 1fr auto; gap: 8px 24px; font-size: 18px; }
-.dots { border-bottom: 1px dotted #222; min-width: 230px; display: inline-block; margin-left: 5px; } table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
+.meta { margin-top: 12px; border: 1px solid #1f2937; border-radius: 16px; padding: 8px 10px; display: grid; grid-template-columns: 54px 1fr; gap: 12px; align-items: start; }
+.meta-box { border: 1px solid #1f2937; height: 76px; margin-top: 4px; } .meta-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.86fr); gap: 4px 20px; font-size: 16px; line-height: 1.2; align-items: start; }
+.dots { border-bottom: 1px dotted #222; min-width: 150px; display: inline-block; margin-left: 5px; } table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
 th, td { border: 1px solid #111; padding: 4px 6px; text-align: left; height: 26px; } th { background: #d9e0ea; font-size: 16px; font-weight: 800; text-transform: uppercase; }
 th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { text-align: center; }
 .totals-grid { margin-top: 14px; display: grid; grid-template-columns: 1fr 1.1fr; gap: 14px; } .totals-box, .summary-box { border: 1px solid #5b8de0; min-height: 92px; padding: 10px 12px; font-size: 18px; }
@@ -144,7 +149,7 @@ th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child
 .sign-line { margin-bottom: 8px; letter-spacing: 2px; } .powered { text-align: center; margin-top: 80px; font-size: 20px; }
   </style></head><body><div class="sheet">
 <div class="header"><div class="logo-wrap"><img src="/pepsi-logo.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
-<div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(customer?.phone || "-")}</span></div></div></div>
+<div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div></div><div>Invoice No : <span class="dots">${escapeHtml(sale?.id || "-")}</span></div></div></div>
 <table><thead><tr><th>Item Code</th><th>Qty</th><th>Billing Price</th><th>Item Discount</th><th>Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
 <div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(sale?.total)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div><div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div></div></div>
 <ul class="notes"><li>Return or exchange only with this receipt</li><li>Credit Payment for all goods shall be made No later than 14 days</li></ul>
@@ -224,16 +229,29 @@ const CashierView = ({
   setCashReceived,
   creditDueDate,
   setCreditDueDate,
+  chequeAmount,
+  setChequeAmount,
+  chequeNo,
+  setChequeNo,
+  chequeDate,
+  setChequeDate,
+  chequeBank,
+  setChequeBank,
   discountMode,
   setDiscountMode,
   discountValue,
   setDiscountValue,
+  lorryLoadMap,
+  currentCartQty,
   cart,
   setCart,
   totals,
   message,
+  setMessage,
+  onSaleDeleted,
   checkout
 }) => {
+  const LORRY_CAPACITY = 1875;
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) return state.products;
@@ -351,6 +369,21 @@ const CashierView = ({
     if (!term) return [];
     return customerNameOptions.filter((name) => name.toLowerCase().includes(term)).slice(0, 8);
   }, [customerName, customerNameOptions]);
+  const lorryLoadRows = useMemo(() => ([
+    { name: "Lorry A", load: Number(lorryLoadMap?.["Lorry A"] || 0) },
+    { name: "Lorry B", load: Number(lorryLoadMap?.["Lorry B"] || 0) }
+  ]), [lorryLoadMap]);
+  const selectedSavedCustomer = useMemo(() => {
+    const key = String(customerName || "").trim().toLowerCase();
+    if (!key) return null;
+    return (state.customers || []).find((item) => String(item.name || "").trim().toLowerCase() === key) || null;
+  }, [customerName, state.customers]);
+  const [customerPhoneDraft, setCustomerPhoneDraft] = useState("");
+  const [savingCustomerPhone, setSavingCustomerPhone] = useState(false);
+
+  useEffect(() => {
+    setCustomerPhoneDraft(String(selectedSavedCustomer?.phone || ""));
+  }, [selectedSavedCustomer?.id, selectedSavedCustomer?.phone]);
 
   const triggerAddHaptic = () => {
     const now = Date.now();
@@ -620,6 +653,46 @@ const CashierView = ({
     }
   };
 
+  const saveBillingCustomerPhone = async () => {
+    if (!selectedSavedCustomer) return;
+    try {
+      setSavingCustomerPhone(true);
+      await updateCustomer(selectedSavedCustomer.id, {
+        name: selectedSavedCustomer.name || customerName.trim(),
+        phone: customerPhoneDraft.trim(),
+        address: selectedSavedCustomer.address || ""
+      });
+      setMessage("Customer phone updated.");
+    } catch (error) {
+      setMessage(error.message || "Unable to update customer phone.");
+    } finally {
+      setSavingCustomerPhone(false);
+    }
+  };
+
+  const deleteRepSale = async (sale) => {
+    try {
+      const saleCashier = String(sale?.cashier || "").trim().toLowerCase();
+      const actingRep = String(cashier || "").trim().toLowerCase();
+      if (!sale || !saleCashier || saleCashier !== actingRep) {
+        setNotice("You can delete only your own bills.");
+        return;
+      }
+      const ok = window.confirm(`Delete sale #${sale.id}? All items on this bill will be restocked.`);
+      if (!ok) return;
+      await deleteSale(sale.id);
+      onSaleDeleted?.(sale.id);
+      if (String(editingSaleId || "") === String(sale.id)) {
+        setEditingSaleId("");
+        setSaleEditLines([]);
+        setSaleEditError("");
+      }
+      setNotice(`Sale #${sale.id} deleted.`);
+    } catch (error) {
+      setNotice(error.message);
+    }
+  };
+
   return (
     <>
       {message && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(message)) ? <p className="notice">{message}</p> : null}
@@ -765,6 +838,21 @@ const CashierView = ({
                 </div>
               ) : null}
               {customerName.trim() ? <p className="form-hint outstanding-text">Outstanding: {currency(selectedCustomerOutstanding)}</p> : null}
+              {selectedSavedCustomer ? (
+                <>
+                  <label className="form-hint">Customer Tel</label>
+                  <div className="checkout-inline-action">
+                    <input
+                      value={customerPhoneDraft}
+                      onChange={(e) => setCustomerPhoneDraft(e.target.value)}
+                      placeholder="Customer phone"
+                    />
+                    <button type="button" className="ghost" onClick={saveBillingCustomerPhone} disabled={savingCustomerPhone}>
+                      {savingCustomerPhone ? "Saving..." : "Save"}
+                    </button>
+                  </div>
+                </>
+              ) : null}
               <label className="form-hint">Total Bill Discount</label>
               <div className="bill-discount-inline">
                 <select value={discountMode} onChange={(e) => setDiscountMode(e.target.value)}>
@@ -783,9 +871,26 @@ const CashierView = ({
               
               <select value={lorry} onChange={(e) => setLorry(e.target.value)}>
                 <option value="">Select delivery lorry</option>
-                <option value="Lorry A">Lorry A</option>
-                <option value="Lorry B">Lorry B</option>
+                {lorryLoadRows.map((row) => {
+                  const remaining = Math.max(0, LORRY_CAPACITY - row.load);
+                  const full = remaining <= 0;
+                  return (
+                    <option key={row.name} value={row.name} disabled={full}>
+                      {full ? `${row.name} - Lorry is full` : `${row.name} - ${remaining} left`}
+                    </option>
+                  );
+                })}
               </select>
+              <div className="form-hint lorry-capacity-note">
+                {lorryLoadRows.map((row) => {
+                  const remaining = Math.max(0, LORRY_CAPACITY - row.load);
+                  return (
+                    <span key={row.name} className={remaining <= 0 ? "outstanding-text" : ""}>
+                      {row.name}: {row.load}/{LORRY_CAPACITY} {remaining <= 0 ? "• Lorry is full" : `• ${remaining} left`}
+                    </span>
+                  );
+                })}
+              </div>
               <select value={paymentType} onChange={(e) => setPaymentType(e.target.value)}>
                 {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
               </select>
@@ -796,6 +901,15 @@ const CashierView = ({
                 <>
                   <label className="form-hint">Credit due date</label>
                   <input type="date" value={creditDueDate} onChange={(e) => setCreditDueDate(e.target.value)} placeholder="Credit due date" />
+                </>
+              ) : null}
+              {paymentType === "cheque" ? (
+                <>
+                  <label className="form-hint">Cheque details</label>
+                  <input type="number" step="0.01" min="0" value={chequeAmount} onChange={(e) => setChequeAmount(e.target.value)} placeholder="Cheque amount" />
+                  <input value={chequeNo} onChange={(e) => setChequeNo(e.target.value)} placeholder="Cheque number" />
+                  <input type="date" value={chequeDate} onChange={(e) => setChequeDate(e.target.value)} placeholder="Cheque date" />
+                  <input value={chequeBank} onChange={(e) => setChequeBank(e.target.value)} placeholder="Bank (optional)" />
                 </>
               ) : null}
               
@@ -923,7 +1037,12 @@ const CashierView = ({
                   </div>
                   <div>
                     <strong>{currency(sale.total)}</strong>
-                    <button type="button" onClick={() => openSaleEdit(sale)}>Edit</button>
+                    <div className="sales-row-actions">
+                      <button type="button" onClick={() => openSaleEdit(sale)}>Edit</button>
+                      {String(sale.cashier || "").trim().toLowerCase() === String(cashier || "").trim().toLowerCase() ? (
+                        <button type="button" className="row-danger" onClick={() => deleteRepSale(sale)}>Delete</button>
+                      ) : null}
+                    </div>
                   </div>
                 </article>
               ))}
@@ -1036,8 +1155,8 @@ const CashierView = ({
               {repStockRows.map((row) => (
                 <article key={`remain-${row.id}`}>
                   <span>{row.name}</span>
-                  <span>{Number(row.billingPrice || 0).toFixed(2)}</span>
-                  <span>{Number(row.mrp || 0).toFixed(2)}</span>
+                  <span>{formatLkrValue(row.billingPrice || 0)}</span>
+                  <span>{formatLkrValue(row.mrp || 0)}</span>
                   <span>{row.remaining}</span>
                 </article>
               ))}
@@ -1058,8 +1177,8 @@ const CashierView = ({
                 .map((row) => (
                   <article key={`damaged-${row.id}`}>
                     <span>{row.name}</span>
-                    <span>{Number(row.billingPrice || 0).toFixed(2)}</span>
-                    <span>{Number(row.mrp || 0).toFixed(2)}</span>
+                    <span>{formatLkrValue(row.billingPrice || 0)}</span>
+                    <span>{formatLkrValue(row.mrp || 0)}</span>
                     <span>{row.damaged}</span>
                   </article>
                 )) : <p className="form-hint">No damaged/expired items recorded yet.</p>}
@@ -1159,6 +1278,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const [showStockSuggestions, setShowStockSuggestions] = useState(false);
   const [newStockItemForm, setNewStockItemForm] = useState({ sku: "", category: "General", billingPrice: "", mrp: "" });
   const stockFileRef = useRef(null);
+  const customerFileRef = useRef(null);
   const [showCustomerForm, setShowCustomerForm] = useState(false);
   const [showStaffForm, setShowStaffForm] = useState(false);
   const [showStockForm, setShowStockForm] = useState(false);
@@ -1688,6 +1808,25 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     () => Number(sortedSalesWiseRows.reduce((acc, row) => acc + Number(row.total || 0), 0).toFixed(2)),
     [sortedSalesWiseRows]
   );
+  const chequeReportSummary = useMemo(() => {
+    const chequeSales = reportSales.filter((sale) => String(sale.paymentType || "").toLowerCase() === "cheque");
+    const chequeCount = chequeSales.length;
+    const totalChequeAmount = Number(chequeSales.reduce((acc, sale) => acc + Number(sale.chequeAmount || sale.paidAmount || 0), 0).toFixed(2));
+    const totalOutstanding = Number(chequeSales.reduce((acc, sale) => acc + Number(sale.outstandingAmount || 0), 0).toFixed(2));
+    const avgChequeAmount = chequeCount ? Number((totalChequeAmount / chequeCount).toFixed(2)) : 0;
+    const latestCheque = chequeSales
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    return {
+      chequeCount,
+      totalChequeAmount,
+      totalOutstanding,
+      avgChequeAmount,
+      latestChequeNo: latestCheque?.chequeNo || "-",
+      latestChequeDate: latestCheque?.chequeDate || "-",
+      latestChequeBank: latestCheque?.chequeBank || "-"
+    };
+  }, [reportSales]);
 
   const loadingSummaryA = useMemo(() => {
     const rows = loadingRowsByLorry["Lorry A"] || [];
@@ -1897,6 +2036,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       if (!ok) return;
       setDeletingSaleId(String(sale.id));
       await deleteSale(sale.id);
+      applyLocalSaleDelete(sale.id);
       setNotice(`Sale #${sale.id} deleted.`);
       if (editingAdminSaleId && String(editingAdminSaleId) === String(sale.id)) {
         setEditingAdminSaleId("");
@@ -2109,8 +2249,8 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     try {
       const rows = (sortedStockRows || []).map((item) => ({
         sku: String(item.sku || ""),
-        billingPrice: Number(item.billingPrice ?? item.price ?? 0).toFixed(2),
-        mrp: Number(item.mrp ?? item.price ?? 0).toFixed(2),
+        billingPrice: formatLkrValue(item.billingPrice ?? item.price ?? 0),
+        mrp: formatLkrValue(item.mrp ?? item.price ?? 0),
         stock: Number(item.stock || 0)
       }));
       const header = ["SKU", "Billing Price (LKR)", "MRP (LKR)", "Stock"];
@@ -2137,6 +2277,115 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     } catch (error) {
       setNotice(error.message || "Unable to export stock report.");
     }
+  };
+
+  const exportCustomerReport = () => {
+    try {
+      const rows = (sortedCustomerRows || []).map((row) => ({
+        name: String(row.name || ""),
+        phone: String(row.phone || ""),
+        address: String(row.address || "")
+      }));
+      const header = ["Name", "Phone", "Address"];
+      const csvRows = [
+        header.join(","),
+        ...rows.map((row) => [
+          `"${row.name.replace(/"/g, '""')}"`,
+          `"${row.phone.replace(/"/g, '""')}"`,
+          `"${row.address.replace(/"/g, '""')}"`
+        ].join(","))
+      ];
+      const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const dateTag = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `customers-${dateTag}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      setNotice("Customer report exported.");
+    } catch (error) {
+      setNotice(error.message || "Unable to export customer report.");
+    }
+  };
+
+  const importCustomers = async (csvText) => {
+    try {
+      const lines = String(csvText || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+      if (!lines.length) {
+        setNotice("Paste or upload customer rows first.");
+        return;
+      }
+      const parseCsvLine = (line) => {
+        const parts = [];
+        let current = "";
+        let quoted = false;
+        for (let i = 0; i < line.length; i += 1) {
+          const char = line[i];
+          if (char === '"') {
+            if (quoted && line[i + 1] === '"') {
+              current += '"';
+              i += 1;
+            } else {
+              quoted = !quoted;
+            }
+          } else if (char === "," && !quoted) {
+            parts.push(current.trim());
+            current = "";
+          } else {
+            current += char;
+          }
+        }
+        parts.push(current.trim());
+        return parts.map((part) => part.replace(/^"(.*)"$/, "$1").trim());
+      };
+      const header = parseCsvLine(lines[0]).map((cell) => cell.toLowerCase());
+      const nameIndex = header.indexOf("name");
+      const phoneIndex = header.indexOf("phone");
+      const addressIndex = header.indexOf("address");
+      if (nameIndex < 0) {
+        setNotice("Customer import requires at least: name,phone,address");
+        return;
+      }
+      const rows = lines.slice(1).map(parseCsvLine).map((cols) => ({
+        name: String(cols[nameIndex] || "").trim(),
+        phone: String(cols[phoneIndex] || "").trim(),
+        address: String(cols[addressIndex] || "").trim()
+      })).filter((row) => row.name);
+      if (!rows.length) {
+        setNotice("No valid customer rows found. Use: name,phone,address");
+        return;
+      }
+      const existingByName = new Map((state.customers || []).map((row) => [String(row.name || "").trim().toLowerCase(), row]));
+      let created = 0;
+      let updated = 0;
+      for (const row of rows) {
+        const matched = existingByName.get(row.name.toLowerCase());
+        if (matched) {
+          await updateCustomer(matched.id, row);
+          updated += 1;
+        } else {
+          await createCustomer(row);
+          created += 1;
+        }
+      }
+      setNotice(`Imported ${updated} updates, created ${created} customers.`);
+    } catch (error) {
+      setNotice(error.message || "Unable to import customers.");
+    }
+  };
+
+  const onCustomerImportFileSelected = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const text = await file.text();
+    await importCustomers(text);
+    event.target.value = "";
   };
 
   const saveStock = async () => {
@@ -2375,13 +2624,24 @@ const AdminView = ({ state, dashboard, message, onError }) => {
             <section className="admin-mobile-section admin-customers-panel">
               <div className="customers-head">
                 <h2>Customers</h2>
-                <button type="button" className="customer-add-icon-btn" onClick={openCustomerAdd} title="Add Customer" aria-label="Add Customer">
-                  <span className="fab-plus">+</span>
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <circle cx="12" cy="8" r="4" />
-                    <path d="M4 20c0-4.5 3.6-8 8-8s8 3.5 8 8" />
-                  </svg>
-                </button>
+                <div className="customers-head-actions">
+                  <button type="button" className="ghost" onClick={exportCustomerReport}>Export</button>
+                  <button type="button" className="ghost" onClick={() => customerFileRef.current?.click()}>Import</button>
+                  <input
+                    ref={customerFileRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={onCustomerImportFileSelected}
+                    hidden
+                  />
+                  <button type="button" className="customer-add-icon-btn" onClick={openCustomerAdd} title="Add Customer" aria-label="Add Customer">
+                    <span className="fab-plus">+</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle cx="12" cy="8" r="4" />
+                      <path d="M4 20c0-4.5 3.6-8 8-8s8 3.5 8 8" />
+                    </svg>
+                  </button>
+                </div>
               </div>
               <input
                 className="customers-search search-icon-input"
@@ -2417,8 +2677,8 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                     <span>{row.name}</span>
                     <span>{row.phone || "-"}</span>
                     <span>{row.orders}</span>
-                    <span>{Number(row.spent || 0).toFixed(2)}</span>
-                    <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{Number(row.outstanding || 0).toFixed(2)}</span>
+                    <span>{formatLkrValue(row.spent || 0)}</span>
+                    <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{formatLkrValue(row.outstanding || 0)}</span>
                   </article>
                 )) : <p>No customer records yet.</p>}
               </div>
@@ -2449,22 +2709,22 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </article>
                   <article>
                     <span>Total Spent (LKR)</span>
-                    <strong>{Number(customerPageSummary.totalSpent || 0).toFixed(2)}</strong>
+                    <strong>{formatLkrValue(customerPageSummary.totalSpent || 0)}</strong>
                   </article>
                   <article className="warn">
                     <span>Total Outstanding (LKR)</span>
-                    <strong>{Number(customerPageSummary.totalOutstanding || 0).toFixed(2)}</strong>
+                    <strong>{formatLkrValue(customerPageSummary.totalOutstanding || 0)}</strong>
                   </article>
                 </div>
                 <div className="customers-summary-foot">
                   <article>
                     <span>Top Customer</span>
                     <strong>{customerPageSummary.topCustomerName}</strong>
-                    <p>LKR {Number(customerPageSummary.topCustomerSpent || 0).toFixed(2)}</p>
+                    <p>LKR {formatLkrValue(customerPageSummary.topCustomerSpent || 0)}</p>
                   </article>
                   <article>
                     <span>Average Order Value</span>
-                    <strong>LKR {Number(customerPageSummary.averageOrderValue || 0).toFixed(2)}</strong>
+                    <strong>LKR {formatLkrValue(customerPageSummary.averageOrderValue || 0)}</strong>
                   </article>
                 </div>
               </section>
@@ -2584,11 +2844,11 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 <div className="stock-summary-foot">
                   <article>
                     <span>Inventory Cost (LKR)</span>
-                    <strong>{stockPageSummary.inventoryCost.toFixed(2)}</strong>
+                    <strong>{formatLkrValue(stockPageSummary.inventoryCost)}</strong>
                   </article>
                   <article>
                     <span>Inventory MRP (LKR)</span>
-                    <strong>{stockPageSummary.inventoryMrp.toFixed(2)}</strong>
+                    <strong>{formatLkrValue(stockPageSummary.inventoryMrp)}</strong>
                   </article>
                   <article className="highlight">
                     <span>Highest Stock</span>
@@ -2620,8 +2880,8 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                     }}
                   >
                     <span>{item.sku}</span>
-                    <span>{Number(item.billingPrice ?? item.price ?? 0).toFixed(2)}</span>
-                    <span>{Number(item.mrp ?? item.price ?? 0).toFixed(2)}</span>
+                    <span>{formatLkrValue(item.billingPrice ?? item.price ?? 0)}</span>
+                    <span>{formatLkrValue(item.mrp ?? item.price ?? 0)}</span>
                     <span className={item.stock <= 25 ? "low" : ""}>{item.stock}</span>
                     <span className="action-cell">
                       <button
@@ -2729,13 +2989,13 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </article>
                   <article>
                     <span>Total Revenue (LKR)</span>
-                    <strong>{staffPageSummary.totalRevenue.toFixed(2)}</strong>
+                    <strong>{formatLkrValue(staffPageSummary.totalRevenue)}</strong>
                   </article>
                 </div>
                 <div className="staff-summary-bottom">
                   <article>
                     <span>Avg Revenue / Staff (LKR)</span>
-                    <strong>{staffPageSummary.avgRevenuePerStaff.toFixed(2)}</strong>
+                    <strong>{formatLkrValue(staffPageSummary.avgRevenuePerStaff)}</strong>
                   </article>
                   <article className="staff-summary-highlight">
                     <span>Top Performer</span>
@@ -2784,7 +3044,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                     <span className="delivery-col-date delivery-cell-date">{row.when}</span>
                     <span className="delivery-col-rep">{row.rep}</span>
                     <span className="delivery-col-lorry">{row.lorry}</span>
-                    <span className="delivery-col-total">{Number(row.total || 0).toFixed(2)}</span>
+                    <span className="delivery-col-total">{formatLkrValue(row.total || 0)}</span>
                     <span className="delivery-col-status">
                       <span className={row.confirmed ? "delivery-status confirmed" : "delivery-status pending"}>
                         {row.confirmed ? "Confirmed" : "Pending"}
@@ -2885,7 +3145,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                       <div className="bar-wrap">
                         <div className="bar" style={{ height: `${(item.count / maxCount) * 100}%` }} />
                       </div>
-                      <div className="bar-meta">{Number(item.revenue || 0).toFixed(2)}</div>
+                      <div className="bar-meta">{formatLkrValue(item.revenue || 0)}</div>
                       <div className="bar-label">{item.short}</div>
                     </div>
                   ))}
@@ -3006,7 +3266,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                       </span>
                       <span>{row.when}</span>
                       <span>{row.lorry}</span>
-                      <span>{Number(row.total || 0).toFixed(2)}</span>
+                      <span>{formatLkrValue(row.total || 0)}</span>
                       <span className="action-cell">
                         <button type="button" className="ghost" onClick={() => setViewSaleId(String(row.id))}>View</button>
                         <button type="button" className="ghost" onClick={() => openAdminSaleEdit(row.raw)}>Edit</button>
@@ -3016,6 +3276,42 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                       </span>
                     </article>
                   )) : <p>No sales records yet.</p>}
+                </div>
+              </section>
+
+              <section className="admin-mobile-section report-panel cheque-report-panel">
+                <h2>Cheque Summary</h2>
+                <div className="cheque-summary-grid">
+                  <article>
+                    <span>Total Cheques</span>
+                    <strong>{chequeReportSummary.chequeCount}</strong>
+                  </article>
+                  <article>
+                    <span>Total Cheque Amount (LKR)</span>
+                    <strong>{formatLkrValue(chequeReportSummary.totalChequeAmount)}</strong>
+                  </article>
+                  <article>
+                    <span>Average Cheque (LKR)</span>
+                    <strong>{formatLkrValue(chequeReportSummary.avgChequeAmount)}</strong>
+                  </article>
+                  <article className="warn">
+                    <span>Outstanding on Cheques (LKR)</span>
+                    <strong>{formatLkrValue(chequeReportSummary.totalOutstanding)}</strong>
+                  </article>
+                </div>
+                <div className="cheque-summary-meta">
+                  <article>
+                    <span>Latest Cheque No</span>
+                    <strong>{chequeReportSummary.latestChequeNo}</strong>
+                  </article>
+                  <article>
+                    <span>Latest Cheque Date</span>
+                    <strong>{chequeReportSummary.latestChequeDate}</strong>
+                  </article>
+                  <article>
+                    <span>Latest Bank</span>
+                    <strong>{chequeReportSummary.latestChequeBank}</strong>
+                  </article>
                 </div>
               </section>
 
@@ -3032,7 +3328,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   <article key={row.name}>
                     <span>{row.name}</span>
                     <span>{row.orders}</span>
-                    <span>{Number(row.spent || 0).toFixed(2)}</span>
+                    <span>{formatLkrValue(row.spent || 0)}</span>
                     <span>{row.lastAt ? new Date(row.lastAt).toLocaleDateString() : "-"}</span>
                   </article>
                 )) : <p>No customer-wise records yet.</p>}
@@ -3108,7 +3404,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   <article><span>Sold Qty</span><strong>{reportDeliverySummary.soldQtyTotal}</strong></article>
                   <article><span>Delivered Qty</span><strong>{reportDeliverySummary.deliveredQtyTotal}</strong></article>
                   <article><span>Undelivered Qty</span><strong>{reportDeliverySummary.undeliveredQtyTotal}</strong></article>
-                  <article><span>Delivered Value (LKR)</span><strong>{reportDeliverySummary.deliveredValueTotal.toFixed(2)}</strong></article>
+                  <article><span>Delivered Value (LKR)</span><strong>{formatLkrValue(reportDeliverySummary.deliveredValueTotal)}</strong></article>
                   <article><span>Delivery Rate</span><strong>{reportDeliverySummary.deliveryRate}%</strong></article>
                 </div>
                 <div className="admin-table delivery-report-sales-table">
@@ -3137,7 +3433,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                       <span>{row.soldQty}</span>
                       <span>{row.undeliveredQty}</span>
                       <span>{row.deliveredQty}</span>
-                      <span>{row.deliveredValue.toFixed(2)}</span>
+                      <span>{formatLkrValue(row.deliveredValue)}</span>
                     </article>
                   )) : <p>No delivery report records for selected filters.</p>}
                 </div>
@@ -3182,7 +3478,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 </div>
                 <div className="admin-table loading-table loading-table-a">
                   <header>
-                    <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingA", "name")}>Item{sortMark("loadingA", "name")}</button>
+                    <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingA", "sku")}>SKU{sortMark("loadingA", "sku")}</button>
                     <button type="button" className="th-sort loading-col-ordered-qty" onClick={() => toggleSort("loadingA", "orderedQty")}>Ord Qty{sortMark("loadingA", "orderedQty")}</button>
                     <button type="button" className="th-sort loading-col-ordered-value" onClick={() => toggleSort("loadingA", "orderedValue")}>Ord Value{sortMark("loadingA", "orderedValue")}</button>
                     <button type="button" className="th-sort loading-col-bundles" onClick={() => toggleSort("loadingA", "bundles")}>Bundles{sortMark("loadingA", "bundles")}</button>
@@ -3192,7 +3488,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </header>
                   {sortedLoadingA.length ? sortedLoadingA.map((row) => (
                     <article key={`a-${row.key}`}>
-                      <span className="loading-col-item">{row.name}</span>
+                      <span className="loading-col-item">{row.sku || "-"}</span>
                       <span className="loading-col-ordered-qty">{row.orderedQty}</span>
                       <span className="loading-col-ordered-value">{currency(row.orderedValue)}</span>
                       <span className="loading-col-bundles">{row.bundles}</span>
@@ -3226,7 +3522,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 </div>
                 <div className="admin-table loading-table loading-table-b">
                   <header>
-                    <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingB", "name")}>Item{sortMark("loadingB", "name")}</button>
+                    <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingB", "sku")}>SKU{sortMark("loadingB", "sku")}</button>
                     <button type="button" className="th-sort loading-col-ordered-qty" onClick={() => toggleSort("loadingB", "orderedQty")}>Ord Qty{sortMark("loadingB", "orderedQty")}</button>
                     <button type="button" className="th-sort loading-col-ordered-value" onClick={() => toggleSort("loadingB", "orderedValue")}>Ord Value{sortMark("loadingB", "orderedValue")}</button>
                     <button type="button" className="th-sort loading-col-bundles" onClick={() => toggleSort("loadingB", "bundles")}>Bundles{sortMark("loadingB", "bundles")}</button>
@@ -3236,7 +3532,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </header>
                   {sortedLoadingB.length ? sortedLoadingB.map((row) => (
                     <article key={`b-${row.key}`}>
-                      <span className="loading-col-item">{row.name}</span>
+                      <span className="loading-col-item">{row.sku || "-"}</span>
                       <span className="loading-col-ordered-qty">{row.orderedQty}</span>
                       <span className="loading-col-ordered-value">{currency(row.orderedValue)}</span>
                       <span className="loading-col-bundles">{row.bundles}</span>
@@ -3286,11 +3582,11 @@ const AdminView = ({ state, dashboard, message, onError }) => {
               </article>
               <article>
                 <span>Total Spent (LKR)</span>
-                <strong>{Number(customerDetailData.row.spent || 0).toFixed(2)}</strong>
+                <strong>{formatLkrValue(customerDetailData.row.spent || 0)}</strong>
               </article>
               <article className={Number(customerDetailData.row.outstanding || 0) > 0 ? "warn" : ""}>
                 <span>Outstanding (LKR)</span>
-                <strong>{Number(customerDetailData.row.outstanding || 0).toFixed(2)}</strong>
+                <strong>{formatLkrValue(customerDetailData.row.outstanding || 0)}</strong>
               </article>
               <article>
                 <span>Total Item Qty</span>
@@ -3298,7 +3594,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
               </article>
               <article>
                 <span>Average Bill Value</span>
-                <strong>LKR {Number(customerDetailData.averageBillValue || 0).toFixed(2)}</strong>
+                <strong>LKR {formatLkrValue(customerDetailData.averageBillValue || 0)}</strong>
               </article>
               <article>
                 <span>Last Purchase</span>
@@ -3386,9 +3682,9 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   <article key={`${viewedSale.id}-${line.productId}`}>
                     <span>{line.sku || productInfoById.get(line.productId)?.sku || "-"}</span>
                     <span>{line.quantity}</span>
-                    <span>{Number(line.price || 0).toFixed(2)}</span>
+                    <span>{formatLkrValue(line.price || 0)}</span>
                     <span>{Number(line.itemDiscount || 0) > 0 ? currency(line.itemDiscount) : "-"}</span>
-                    <span>{Number((Number(line.price || 0) * Number(line.quantity || 0)) || 0).toFixed(2)}</span>
+                    <span>{formatLkrValue((Number(line.price || 0) * Number(line.quantity || 0)) || 0)}</span>
                   </article>
                 ))}
               </div>
@@ -3515,6 +3811,10 @@ export const App = () => {
   const [paymentType, setPaymentType] = useState(PAYMENT_TYPES[0]);
   const [cashReceived, setCashReceived] = useState("");
   const [creditDueDate, setCreditDueDate] = useState("");
+  const [chequeAmount, setChequeAmount] = useState("");
+  const [chequeNo, setChequeNo] = useState("");
+  const [chequeDate, setChequeDate] = useState("");
+  const [chequeBank, setChequeBank] = useState("");
   const [discountMode, setDiscountMode] = useState("amount");
   const [discountValue, setDiscountValue] = useState("");
   const [cart, setCart] = useState([]);
@@ -3545,6 +3845,21 @@ export const App = () => {
     return Number(raw.toFixed(2));
   }, [effectiveCartLines, discountMode, discountValue]);
   const totals = useMemo(() => calculateTotals({ lines: effectiveCartLines, taxRate, discount: discountAmount }), [effectiveCartLines, taxRate, discountAmount]);
+  const currentCartQty = useMemo(
+    () => effectiveCartLines.reduce((acc, line) => acc + Number(line.quantity || 0), 0),
+    [effectiveCartLines]
+  );
+  const lorryLoadMap = useMemo(() => {
+    const next = { "Lorry A": 0, "Lorry B": 0 };
+    for (const sale of (state.sales || [])) {
+      const lorryName = String(sale.lorry || "").trim();
+      if (!next[lorryName]) continue;
+      if (sale.deliveryConfirmedAt) continue;
+      const soldQty = (sale.lines || []).reduce((acc, line) => acc + Number(line.quantity || 0), 0);
+      next[lorryName] += soldQty;
+    }
+    return next;
+  }, [state.sales]);
 
   useEffect(() => {
     const handleInvalidSession = () => {
@@ -3617,7 +3932,45 @@ export const App = () => {
   useEffect(() => {
     if (paymentType !== "cash") setCashReceived("");
     if (paymentType !== "credit") setCreditDueDate("");
+    if (paymentType !== "cheque") {
+      setChequeAmount("");
+      setChequeNo("");
+      setChequeDate("");
+      setChequeBank("");
+    }
   }, [paymentType]);
+
+  const applyLocalSaleDelete = (saleId) => {
+    setState((current) => {
+      const targetSale = (current.sales || []).find((sale) => String(sale.id) === String(saleId));
+      if (!targetSale) return current;
+
+      const returnedByProduct = new Map();
+      for (const ret of (current.returns || [])) {
+        if (String(ret.saleId) !== String(saleId)) continue;
+        for (const line of (ret.lines || [])) {
+          returnedByProduct.set(line.productId, (returnedByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
+        }
+      }
+
+      return {
+        ...current,
+        products: (current.products || []).map((product) => {
+          const saleLine = (targetSale.lines || []).find((line) => line.productId === product.id);
+          if (!saleLine) return product;
+          const sold = Number(saleLine.quantity || 0);
+          const alreadyReturned = Number(returnedByProduct.get(product.id) || 0);
+          const netSold = Math.max(0, sold - alreadyReturned);
+          return {
+            ...product,
+            stock: Number((Number(product.stock || 0) + netSold).toFixed(2))
+          };
+        }),
+        sales: (current.sales || []).filter((sale) => String(sale.id) !== String(saleId)),
+        returns: (current.returns || []).filter((ret) => String(ret.saleId) !== String(saleId))
+      };
+    });
+  };
 
   const login = async ({ username, password }) => {
     const attempts = [
@@ -3654,8 +4007,21 @@ export const App = () => {
 
   const checkout = async () => {
     try {
+      const LORRY_CAPACITY = 1875;
+      const matchedCustomer = (state.customers || []).find(
+        (item) => String(item.name || "").trim().toLowerCase() === String(customerName || "").trim().toLowerCase()
+      );
       if (!lorry) {
         showErrorModal("Select delivery lorry (Lorry A or Lorry B).");
+        return;
+      }
+      const pendingLoad = Number(lorryLoadMap[lorry] || 0);
+      if (pendingLoad >= LORRY_CAPACITY) {
+        showErrorModal("Selected lorry is full.");
+        return;
+      }
+      if ((pendingLoad + currentCartQty) > LORRY_CAPACITY) {
+        showErrorModal(`Selected lorry exceeds capacity. Only ${Math.max(0, LORRY_CAPACITY - pendingLoad)} items left.`);
         return;
       }
       if (paymentType === "cash") {
@@ -3669,19 +4035,42 @@ export const App = () => {
         showErrorModal("Select credit due date.");
         return;
       }
+      if (paymentType === "cheque") {
+        const chequePaid = Number(chequeAmount || 0);
+        if (!Number.isFinite(chequePaid) || chequePaid < 0) {
+          showErrorModal("Cheque amount must be 0 or more.");
+          return;
+        }
+        if (!chequeNo.trim()) {
+          showErrorModal("Enter cheque number.");
+          return;
+        }
+        if (!chequeDate) {
+          showErrorModal("Select cheque date.");
+          return;
+        }
+      }
       const sale = await submitSale({
         cashier,
         customerName,
+        customerPhone: matchedCustomer?.phone ? String(matchedCustomer.phone).trim() : undefined,
         lorry,
         paymentType,
         cashReceived: paymentType === "cash" ? Number(cashReceived || 0) : undefined,
         creditDueDate: paymentType === "credit" ? creditDueDate : undefined,
+        chequeAmount: paymentType === "cheque" ? Number(chequeAmount || 0) : undefined,
+        chequeNo: paymentType === "cheque" ? chequeNo.trim() : undefined,
+        chequeDate: paymentType === "cheque" ? chequeDate : undefined,
+        chequeBank: paymentType === "cheque" ? chequeBank.trim() : undefined,
         discount: discountAmount,
         taxRate: 0,
         lines: effectiveCartLines
       });
       openSaleReceiptPrint({
-        sale,
+        sale: {
+          ...sale,
+          customerPhone: sale?.customerPhone || (matchedCustomer?.phone ? String(matchedCustomer.phone).trim() : "")
+        },
         customers: state.customers || [],
         products: state.products || [],
         fallbackCustomerName: customerName,
@@ -3692,6 +4081,10 @@ export const App = () => {
       setDiscountValue("");
       setCashReceived("");
       setCreditDueDate("");
+      setChequeAmount("");
+      setChequeNo("");
+      setChequeDate("");
+      setChequeBank("");
       setDashboard(await fetchDashboard());
     } catch (error) {
       showErrorModal(error.message);
@@ -3722,16 +4115,28 @@ export const App = () => {
           setCashReceived={setCashReceived}
           creditDueDate={creditDueDate}
           setCreditDueDate={setCreditDueDate}
+          chequeAmount={chequeAmount}
+          setChequeAmount={setChequeAmount}
+          chequeNo={chequeNo}
+          setChequeNo={setChequeNo}
+          chequeDate={chequeDate}
+          setChequeDate={setChequeDate}
+          chequeBank={chequeBank}
+          setChequeBank={setChequeBank}
           discountMode={discountMode}
-          setDiscountMode={setDiscountMode}
-          discountValue={discountValue}
-          setDiscountValue={setDiscountValue}
-          cart={cart}
-          setCart={setCart}
-          totals={totals}
-          message={message}
-          checkout={checkout}
-        />
+        setDiscountMode={setDiscountMode}
+        discountValue={discountValue}
+        setDiscountValue={setDiscountValue}
+        lorryLoadMap={lorryLoadMap}
+        currentCartQty={currentCartQty}
+        cart={cart}
+        setCart={setCart}
+        totals={totals}
+        message={message}
+        setMessage={setMessage}
+        onSaleDeleted={applyLocalSaleDelete}
+        checkout={checkout}
+      />
       ) : (
         <AdminView
           state={state}

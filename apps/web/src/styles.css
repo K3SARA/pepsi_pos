@@ -1758,6 +1758,51 @@ button:disabled {
   text-align: center;
 }
 
+.cheque-report-panel .cheque-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 0.48rem;
+}
+
+.cheque-report-panel .cheque-summary-grid article,
+.cheque-report-panel .cheque-summary-meta article {
+  border: 1px solid #d1dceb;
+  border-radius: 12px;
+  background:
+    radial-gradient(120% 120% at 100% 0%, rgba(115, 168, 255, 0.12) 0%, rgba(115, 168, 255, 0) 66%),
+    linear-gradient(180deg, #fbfdff 0%, #eef4fc 100%);
+  padding: 0.52rem 0.58rem;
+  box-shadow: 0 8px 15px rgba(17, 38, 61, 0.08);
+}
+
+.cheque-report-panel .cheque-summary-grid article.warn {
+  border-color: #edd0cd;
+  background: linear-gradient(180deg, #fffafa 0%, #fff3f2 100%);
+}
+
+.cheque-report-panel .cheque-summary-grid span,
+.cheque-report-panel .cheque-summary-meta span {
+  display: block;
+  color: #5a6f88;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.cheque-report-panel .cheque-summary-grid strong,
+.cheque-report-panel .cheque-summary-meta strong {
+  display: block;
+  margin-top: 0.2rem;
+  color: #132842;
+  font-size: 1rem;
+}
+
+.cheque-report-panel .cheque-summary-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 0.45rem;
+}
+
 .loadings-page {
   gap: 0.95rem;
 }
@@ -1913,6 +1958,36 @@ button:disabled {
 
 .customers-head h2 {
   margin: 0;
+}
+
+.customers-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.sales-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+  margin-top: 0.45rem;
+}
+
+.checkout-inline-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.lorry-capacity-note {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
 }
 
 .customer-add-icon-btn {
@@ -4048,6 +4123,21 @@ button:disabled {
   .delivery-report-sales-table article {
     grid-template-columns: 0.7fr 0.78fr 0.74fr 0.74fr 0.8fr 0.5fr 0.5fr 0.62fr 0.86fr;
     font-size: 0.7rem;
+  }
+
+  .cheque-report-panel .cheque-summary-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.34rem;
+  }
+
+  .cheque-report-panel .cheque-summary-meta {
+    grid-template-columns: 1fr;
+    gap: 0.34rem;
+  }
+
+  .cheque-report-panel .cheque-summary-grid article,
+  .cheque-report-panel .cheque-summary-meta article {
+    padding: 0.44rem 0.48rem;
   }
 
   .returned-stock-panel {

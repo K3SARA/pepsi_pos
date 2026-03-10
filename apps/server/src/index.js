@@ -286,7 +286,7 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
   res.status(201).json(record);
 });
 
-app.patch("/customers/:id", requireAuth, requireRole("admin"), (req, res) => {
+app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, res) => {
   const { id } = req.params;
   const body = req.body || {};
 
@@ -294,7 +294,14 @@ app.patch("/customers/:id", requireAuth, requireRole("admin"), (req, res) => {
     state.customers = state.customers || [];
     const idx = state.customers.findIndex((item) => item.id === id);
     if (idx === -1) return state;
-    state.customers[idx] = { ...state.customers[idx], ...body };
+    if (req.user?.role === "cashier") {
+      state.customers[idx] = {
+        ...state.customers[idx],
+        phone: String(body.phone || "").trim()
+      };
+    } else {
+      state.customers[idx] = { ...state.customers[idx], ...body };
+    }
     return state;
   });
 
@@ -363,9 +370,14 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
   const body = req.body || {};
   const lines = Array.isArray(body.lines) ? body.lines : [];
   const lorry = String(body.lorry || "").trim();
+  const customerPhone = String(body.customerPhone || "").trim();
   const paymentType = String(body.paymentType || "cash");
   const cashReceived = Number(body.cashReceived || 0);
   const creditDueDate = String(body.creditDueDate || "").trim();
+  const chequeAmount = Number(body.chequeAmount || 0);
+  const chequeNo = String(body.chequeNo || "").trim();
+  const chequeDate = String(body.chequeDate || "").trim();
+  const chequeBank = String(body.chequeBank || "").trim();
 
   if (!lines.length) {
     res.status(400).json({ message: "Cart is empty" });
@@ -401,11 +413,30 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
       res.status(409).json({ message: `Insufficient stock for ${product.name}` });
       return;
     }
+    const basePrice = Number(
+      line.basePrice ?? product.billingPrice ?? product.price ?? product.mrp ?? 0
+    );
+    const incomingMode = String(line.itemDiscountMode || "amount").trim().toLowerCase();
+    const itemDiscountMode = incomingMode === "percent" ? "percent" : "amount";
+    const rawDiscount = Number(line.itemDiscount || 0);
+    const safeDiscount = Number.isFinite(rawDiscount) && rawDiscount > 0 ? rawDiscount : 0;
+    const discountAmount = itemDiscountMode === "percent"
+      ? Math.min(100, safeDiscount)
+      : Math.min(basePrice, safeDiscount);
+    const netUnitPrice = Number(line.price);
+    const resolvedUnitPrice = Number.isFinite(netUnitPrice)
+      ? Math.max(0, netUnitPrice)
+      : Math.max(0, itemDiscountMode === "percent"
+        ? Number((basePrice - ((basePrice * discountAmount) / 100)).toFixed(2))
+        : Number((basePrice - discountAmount).toFixed(2)));
     preparedLines.push({
       productId: product.id,
       name: line.name || `${product.name}${product.size ? ` ${product.size}` : ""}`,
       quantity,
-      price: Number(product.billingPrice ?? product.price ?? product.mrp ?? 0)
+      basePrice: Number(basePrice.toFixed(2)),
+      itemDiscount: Number(discountAmount.toFixed(2)),
+      itemDiscountMode,
+      price: Number(resolvedUnitPrice.toFixed(2))
     });
   }
 
@@ -414,6 +445,7 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
     createdAt: new Date().toISOString(),
     cashier: body.cashier || req.user.username,
     customerName: body.customerName || "Walk-in",
+    customerPhone,
     lorry,
     paymentType,
     notes: body.notes || "",
@@ -430,6 +462,10 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
     const paid = Math.min(Number(prepared.total || 0), Number(cashReceived || 0));
     prepared.cashReceived = Number(cashReceived.toFixed(2));
     prepared.creditDueDate = "";
+    prepared.chequeAmount = null;
+    prepared.chequeNo = "";
+    prepared.chequeDate = "";
+    prepared.chequeBank = "";
     prepared.paidAmount = Number(paid.toFixed(2));
     prepared.outstandingAmount = Number((Number(prepared.total || 0) - paid).toFixed(2));
   } else if (paymentType === "credit") {
@@ -439,11 +475,41 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
     }
     prepared.cashReceived = null;
     prepared.creditDueDate = creditDueDate;
+    prepared.chequeAmount = null;
+    prepared.chequeNo = "";
+    prepared.chequeDate = "";
+    prepared.chequeBank = "";
     prepared.paidAmount = 0;
     prepared.outstandingAmount = Number(prepared.total || 0);
+  } else if (paymentType === "cheque") {
+    if (!Number.isFinite(chequeAmount) || chequeAmount < 0) {
+      res.status(400).json({ message: "Cheque amount must be 0 or more" });
+      return;
+    }
+    if (!chequeNo) {
+      res.status(400).json({ message: "Cheque number is required" });
+      return;
+    }
+    if (!chequeDate) {
+      res.status(400).json({ message: "Cheque date is required" });
+      return;
+    }
+    const paid = Math.min(Number(prepared.total || 0), Number(chequeAmount || 0));
+    prepared.cashReceived = null;
+    prepared.creditDueDate = "";
+    prepared.chequeAmount = Number(chequeAmount.toFixed(2));
+    prepared.chequeNo = chequeNo;
+    prepared.chequeDate = chequeDate;
+    prepared.chequeBank = chequeBank;
+    prepared.paidAmount = Number(paid.toFixed(2));
+    prepared.outstandingAmount = Number((Number(prepared.total || 0) - paid).toFixed(2));
   } else {
     prepared.cashReceived = null;
     prepared.creditDueDate = "";
+    prepared.chequeAmount = null;
+    prepared.chequeNo = "";
+    prepared.chequeDate = "";
+    prepared.chequeBank = "";
     prepared.paidAmount = Number(prepared.total || 0);
     prepared.outstandingAmount = 0;
   }
@@ -466,10 +532,12 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
       draft.customers.push({
         id: nanoid(12),
         name: prepared.customerName,
-        phone: "",
+        phone: prepared.customerPhone || "",
         address: "",
         createdAt: new Date().toISOString()
       });
+    } else if (existingCustomer && prepared.customerPhone) {
+      existingCustomer.phone = prepared.customerPhone;
     }
 
     const existingStaff = draft.staff.find((item) => item.name.toLowerCase() === prepared.cashier.toLowerCase());
@@ -607,13 +675,21 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
   res.json(recalculated);
 });
 
-app.delete("/sales/:id", requireAuth, requireRole("admin"), (req, res) => {
+app.delete("/sales/:id", requireAuth, requireRole("admin", "cashier"), (req, res) => {
   const { id } = req.params;
   const state = getState();
   const sale = (state.sales || []).find((item) => String(item.id) === String(id));
   if (!sale) {
     res.status(404).json({ message: "Sale not found" });
     return;
+  }
+  if (req.user?.role === "cashier") {
+    const saleCashier = String(sale.cashier || "").trim().toLowerCase();
+    const actingUser = String(req.user?.username || "").trim().toLowerCase();
+    if (!saleCashier || saleCashier !== actingUser) {
+      res.status(403).json({ message: "You can delete only your own bills" });
+      return;
+    }
   }
 
   const returnedByProduct = new Map();
