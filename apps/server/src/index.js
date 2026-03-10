@@ -368,6 +368,7 @@ app.patch("/staff/:id", requireAuth, requireRole("admin"), (req, res) => {
 
 app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
   const body = req.body || {};
+  const requestId = String(body.requestId || "").trim();
   const lines = Array.isArray(body.lines) ? body.lines : [];
   const lorry = String(body.lorry || "").trim();
   const customerPhone = String(body.customerPhone || "").trim();
@@ -389,6 +390,13 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
   }
 
   const state = getState();
+  if (requestId) {
+    const existingSale = (state.sales || []).find((item) => String(item.requestId || "") === requestId);
+    if (existingSale) {
+      res.status(200).json(existingSale);
+      return;
+    }
+  }
   const productMap = new Map(state.products.map((p) => [p.id, p]));
   const maxSaleNo = (state.sales || []).reduce((max, sale) => {
     const raw = String(sale.id || "").trim();
@@ -442,6 +450,7 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
 
   const prepared = enrichSale({
     id: nextSaleId,
+    requestId,
     createdAt: new Date().toISOString(),
     cashier: body.cashier || req.user.username,
     customerName: body.customerName || "Walk-in",
@@ -607,11 +616,30 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
       return;
     }
     newQtyByProduct.set(productId, (newQtyByProduct.get(productId) || 0) + quantity);
+    const basePrice = Number(
+      line.basePrice ?? product.billingPrice ?? product.price ?? product.mrp ?? 0
+    );
+    const incomingMode = String(line.itemDiscountMode || "amount").trim().toLowerCase();
+    const itemDiscountMode = incomingMode === "percent" ? "percent" : "amount";
+    const rawDiscount = Number(line.itemDiscount || 0);
+    const safeDiscount = Number.isFinite(rawDiscount) && rawDiscount > 0 ? rawDiscount : 0;
+    const discountAmount = itemDiscountMode === "percent"
+      ? Math.min(100, safeDiscount)
+      : Math.min(basePrice, safeDiscount);
+    const netUnitPrice = Number(line.price);
+    const resolvedUnitPrice = Number.isFinite(netUnitPrice)
+      ? Math.max(0, netUnitPrice)
+      : Math.max(0, itemDiscountMode === "percent"
+        ? Number((basePrice - ((basePrice * discountAmount) / 100)).toFixed(2))
+        : Number((basePrice - discountAmount).toFixed(2)));
     preparedLines.push({
       productId,
       name: line.name || `${product.name}${product.size ? ` ${product.size}` : ""}`,
       quantity,
-      price: Number(product.billingPrice ?? product.price ?? product.mrp ?? 0)
+      basePrice: Number(basePrice.toFixed(2)),
+      itemDiscount: Number(discountAmount.toFixed(2)),
+      itemDiscountMode,
+      price: Number(resolvedUnitPrice.toFixed(2))
     });
   }
 

@@ -81,10 +81,22 @@ const getBundleBreakdown = (row) => {
 };
 const productSalePrice = (product) => Number(product?.billingPrice ?? product?.price ?? product?.mrp ?? 0);
 const lineBasePrice = (line) => Number(line?.basePrice ?? line?.price ?? 0);
+const lineStoredDiscountAmount = (line) => {
+  const base = lineBasePrice(line);
+  const explicitAmount = Number(line?.itemDiscountAmount || 0);
+  if (Number.isFinite(explicitAmount) && explicitAmount > 0) return Math.min(base, explicitAmount);
+  const storedPrice = Number(line?.price);
+  if (Number.isFinite(storedPrice) && base > 0 && storedPrice >= 0 && storedPrice < base) {
+    return Number((base - storedPrice).toFixed(2));
+  }
+  return 0;
+};
 const lineItemDiscount = (line) => {
   const raw = Number(line?.itemDiscount || 0);
-  if (!Number.isFinite(raw) || raw <= 0) return 0;
   const base = lineBasePrice(line);
+  const storedAmount = lineStoredDiscountAmount(line);
+  if (storedAmount > 0) return storedAmount;
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
   if (String(line?.itemDiscountMode || "amount") === "percent") {
     const percent = Math.min(raw, 100);
     return Number(((base * percent) / 100).toFixed(2));
@@ -92,6 +104,20 @@ const lineItemDiscount = (line) => {
   return Math.min(raw, base);
 };
 const lineFinalPrice = (line) => Math.max(0, lineBasePrice(line) - Math.max(0, lineItemDiscount(line)));
+const editableLineDiscountValue = (line) => {
+  const base = lineBasePrice(line);
+  const mode = String(line?.itemDiscountMode || "amount");
+  const raw = Number(line?.itemDiscount || 0);
+  const applied = lineStoredDiscountAmount(line);
+  if (mode === "percent") {
+    if (applied > 0 && base > 0) return Number(((applied / base) * 100).toFixed(2));
+    if (!Number.isFinite(raw) || raw <= 0) return 0;
+    return Math.min(raw, 100);
+  }
+  if (applied > 0) return applied;
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.min(raw, base);
+};
 
 const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCustomerName = "", onPopupBlocked = () => {} }) => {
   if (typeof window === "undefined" || !sale) return;
@@ -112,7 +138,7 @@ const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCus
     const qty = Math.max(0, Number(line?.quantity || 0));
     const product = (products || []).find((p) => p.id === line?.productId);
     const billingPrice = Number(line?.basePrice ?? line?.price ?? product?.billingPrice ?? product?.price ?? 0);
-    const itemDiscount = Math.max(0, Number(line?.itemDiscount || 0));
+    const itemDiscount = lineItemDiscount(line);
     const netUnit = Math.max(0, Number(line?.price ?? (billingPrice - itemDiscount)));
     const sku = line?.sku || product?.sku || "";
     return { sku, qty, billingPrice, itemDiscount, total: netUnit * qty };
@@ -249,6 +275,7 @@ const CashierView = ({
   message,
   setMessage,
   onSaleDeleted,
+  savingCheckout,
   checkout
 }) => {
   const LORRY_CAPACITY = 1875;
@@ -281,6 +308,12 @@ const CashierView = ({
   const savedCustomers = useMemo(() => {
     return [...(state.customers || [])].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
   }, [state.customers]);
+  const [repCustomerSearch, setRepCustomerSearch] = useState("");
+  const filteredRepCustomers = useMemo(() => {
+    const term = String(repCustomerSearch || "").trim().toLowerCase();
+    if (!term) return savedCustomers;
+    return savedCustomers.filter((customer) => String(customer.name || "").toLowerCase().includes(term));
+  }, [repCustomerSearch, savedCustomers]);
   const customerOutstandingMap = useMemo(() => {
     const map = new Map();
     for (const sale of (state.sales || [])) {
@@ -627,7 +660,10 @@ const CashierView = ({
     setSaleEditLines((sale.lines || []).map((line) => ({
       productId: line.productId,
       name: line.name,
-      quantity: Number(line.quantity || 0)
+      quantity: Number(line.quantity || 0),
+      basePrice: Number(line.basePrice ?? line.price ?? 0),
+      itemDiscount: editableLineDiscountValue(line),
+      itemDiscountMode: String(line.itemDiscountMode || "amount")
     })));
     setSaleEditError("");
   };
@@ -635,7 +671,13 @@ const CashierView = ({
   const saveSaleEdit = async () => {
     try {
       const lines = saleEditLines
-        .map((line) => ({ ...line, quantity: Number(line.quantity || 0) }))
+        .map((line) => ({
+          ...line,
+          quantity: Number(line.quantity || 0),
+          itemDiscount: Number(line.itemDiscount || 0),
+          itemDiscountMode: String(line.itemDiscountMode || "amount"),
+          price: lineFinalPrice(line)
+        }))
         .filter((line) => Number.isFinite(line.quantity) && line.quantity > 0);
       if (!editingSaleId || !lines.length) {
         setSaleEditError("Keep at least one item in bill.");
@@ -919,7 +961,7 @@ const CashierView = ({
             
             
            
-            <button className="checkout" type="button" onClick={checkout} disabled={!cart.length}>Complete Sale</button>
+            <button className="checkout" type="button" onClick={checkout} disabled={!cart.length || savingCheckout}>{savingCheckout ? "Saving..." : "Complete Sale"}</button>
             
           </section>
 
@@ -1025,18 +1067,22 @@ const CashierView = ({
 
       {cashierPage === "sales" ? (
         <main className="grid">
-          <section className="panel">
+          <section className="panel rep-sales-panel">
             <h2>My Sales</h2>
-            <div className="list">
+            <div className="list rep-sales-list">
               {repSales.map((sale) => (
-                <article key={sale.id} className="list-row">
-                  <div>
-                    <strong>#{sale.id}</strong>
-                    <p>{new Date(sale.createdAt).toLocaleString()}</p>
-                    <p>{sale.customerName} • {sale.paymentType} • {sale.lorry || "-"}</p>
+                <article key={sale.id} className="list-row rep-sale-card">
+                  <div className="rep-sale-main">
+                    <div className="rep-sale-id-row">
+                      <strong>#{sale.id}</strong>
+                      <span className={`rep-sale-payment rep-sale-payment-${String(sale.paymentType || "").toLowerCase()}`}>{sale.paymentType}</span>
+                    </div>
+                    <p className="rep-sale-meta">{new Date(sale.createdAt).toLocaleString()}</p>
+                    <p className="rep-sale-customer">{sale.customerName}</p>
+                    <p className="rep-sale-meta">Lorry: {sale.lorry || "-"}</p>
                   </div>
-                  <div>
-                    <strong>{currency(sale.total)}</strong>
+                  <div className="rep-sale-side">
+                    <strong className="rep-sale-total">{currency(sale.total)}</strong>
                     <div className="sales-row-actions">
                       <button type="button" onClick={() => openSaleEdit(sale)}>Edit</button>
                       {String(sale.cashier || "").trim().toLowerCase() === String(cashier || "").trim().toLowerCase() ? (
@@ -1048,17 +1094,59 @@ const CashierView = ({
               ))}
             </div>
             {editingSaleId ? (
-              <div className="admin-inline-form">
-                <p className="form-hint">Editing sale #{editingSaleId}</p>
-                {saleEditLines.map((line) => (
-                  <div key={line.productId} className="stock-row">
-                    <span>{line.name}</span>
+              <div className="admin-inline-form rep-sale-edit-form">
+                <p className="form-hint rep-sale-edit-title">Editing sale #{editingSaleId}</p>
+              {saleEditLines.map((line) => (
+                <div key={line.productId} className="rep-sale-edit-row">
+                  <div className="rep-sale-edit-name">{line.name}</div>
+                  <div className="rep-sale-edit-controls">
+                  <label className="rep-sale-field">
+                    <span>Qty</span>
                     <input type="number" min="1" value={line.quantity} onChange={(e) => setSaleEditLines((current) => current.map((l) => (l.productId === line.productId ? { ...l, quantity: e.target.value } : l)))} />
-                    <button type="button" className="row-danger" onClick={() => setSaleEditLines((current) => current.filter((l) => l.productId !== line.productId))}>Remove</button>
+                  </label>
+                  <label className="rep-sale-field">
+                    <span>Type</span>
+                    <select value={line.itemDiscountMode || "amount"} onChange={(e) => setSaleEditLines((current) => current.map((l) => {
+                    if (l.productId !== line.productId) return l;
+                    const nextMode = e.target.value === "percent" ? "percent" : "amount";
+                    const currentValue = Number(l.itemDiscount || 0);
+                    const base = Number(l.basePrice || 0);
+                    return {
+                      ...l,
+                      itemDiscountMode: nextMode,
+                      itemDiscount: nextMode === "percent" ? Math.min(currentValue, 100) : Math.min(currentValue, base)
+                    };
+                  }))}>
+                      <option value="amount">Rs.</option>
+                      <option value="percent">%</option>
+                    </select>
+                  </label>
+                  <label className="rep-sale-field">
+                    <span>Item Discount</span>
+                    <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={line.itemDiscount ?? 0}
+                    onChange={(e) => setSaleEditLines((current) => current.map((l) => {
+                      if (l.productId !== line.productId) return l;
+                      const parsed = Number(e.target.value || 0);
+                      if (!Number.isFinite(parsed) || parsed < 0) return l;
+                      const base = Number(l.basePrice || 0);
+                      return {
+                        ...l,
+                        itemDiscount: l.itemDiscountMode === "percent" ? Math.min(parsed, 100) : Math.min(parsed, base)
+                      };
+                    }))}
+                    placeholder="Disc"
+                  />
+                  </label>
+                  <button type="button" className="row-danger" onClick={() => setSaleEditLines((current) => current.filter((l) => l.productId !== line.productId))}>Remove</button>
                   </div>
-                ))}
+                </div>
+              ))}
                 {saleEditError ? <p className="form-hint">{saleEditError}</p> : null}
-                <div>
+                <div className="rep-sale-edit-actions">
                   <button type="button" onClick={saveSaleEdit} disabled={savingSaleEdit}>{savingSaleEdit ? "Saving..." : "Save Edit"}</button>
                   <button type="button" className="ghost" onClick={() => { setEditingSaleId(""); setSaleEditLines([]); setSaleEditError(""); }}>Cancel</button>
                 </div>
@@ -1105,19 +1193,33 @@ const CashierView = ({
 
       {cashierPage === "customers" ? (
         <main className="grid">
-          <section className="panel">
-            <h2>Saved Customers</h2>
-            <div className="list">
-              {savedCustomers.length ? savedCustomers.map((customer) => (
-                <article key={customer.id} className="list-row">
-                  <div>
+          <section className="panel rep-customers-panel">
+            <div className="rep-customers-head">
+              <h2>Saved Customers</h2>
+              <p>Find customer details and outstanding balance quickly.</p>
+            </div>
+            <input
+              className="search-icon-input rep-customers-search"
+              value={repCustomerSearch}
+              onChange={(e) => setRepCustomerSearch(e.target.value)}
+              placeholder="Search customer by name"
+            />
+            <div className="list rep-customers-list">
+              {filteredRepCustomers.length ? filteredRepCustomers.map((customer) => (
+                <article key={customer.id} className="list-row rep-customer-card">
+                  <div className="rep-customer-main">
                     <strong>{customer.name}</strong>
-                    <p>{customer.phone || "-"}</p>
-                    <p>{customer.address || "-"}</p>
-                    <p className="outstanding-text">Outstanding: {currency(customerOutstandingMap.get(customer.name) || 0)}</p>
+                    <p className="rep-customer-phone">{customer.phone || "-"}</p>
+                    <p className="rep-customer-address">{customer.address || "-"}</p>
+                  </div>
+                  <div className="rep-customer-side">
+                    <span className="rep-customer-side-label">Outstanding</span>
+                    <strong className={Number(customerOutstandingMap.get(customer.name) || 0) > 0 ? "outstanding-text" : ""}>
+                      {currency(customerOutstandingMap.get(customer.name) || 0)}
+                    </strong>
                   </div>
                 </article>
-              )) : <p>No saved customers yet.</p>}
+              )) : <p className="form-hint rep-customers-empty">No matching customers found.</p>}
             </div>
           </section>
         </main>
@@ -1193,7 +1295,7 @@ const CashierView = ({
             <p>{cart.length} item(s)</p>
             <strong>{currency(totals.total)}</strong>
           </div>
-          <button type="button" onClick={checkout} disabled={!cart.length}>Complete Sale</button>
+          <button type="button" onClick={checkout} disabled={!cart.length || savingCheckout}>{savingCheckout ? "Saving..." : "Complete Sale"}</button>
         </div>
       ) : null}
       {showAddCustomer ? (
@@ -3819,6 +3921,7 @@ export const App = () => {
   const [discountValue, setDiscountValue] = useState("");
   const [cart, setCart] = useState([]);
   const [message, setMessage] = useState("");
+  const [savingCheckout, setSavingCheckout] = useState(false);
   const [errorModal, setErrorModal] = useState("");
   const [authError, setAuthError] = useState("");
   const [session, setSession] = useState(null);
@@ -3940,6 +4043,26 @@ export const App = () => {
     }
   }, [paymentType]);
 
+  useEffect(() => {
+    if (!session?.user || typeof window === "undefined") return undefined;
+
+    const marker = { pepsiPosGuard: true, ts: Date.now() };
+    window.history.pushState(marker, "", window.location.href);
+
+    const handlePopState = () => {
+      const shouldExit = window.confirm("Are you sure you want to exit?");
+      if (shouldExit) {
+        window.removeEventListener("popstate", handlePopState);
+        window.history.back();
+        return;
+      }
+      window.history.pushState({ pepsiPosGuard: true, ts: Date.now() }, "", window.location.href);
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [session?.user]);
+
   const applyLocalSaleDelete = (saleId) => {
     setState((current) => {
       const targetSale = (current.sales || []).find((sale) => String(sale.id) === String(saleId));
@@ -4005,8 +4128,15 @@ export const App = () => {
     setMessage("");
   };
 
+  const createSaleRequestId = () => {
+    if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+    return `sale-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  };
+
   const checkout = async () => {
     try {
+      if (savingCheckout) return;
+      setSavingCheckout(true);
       const LORRY_CAPACITY = 1875;
       const matchedCustomer = (state.customers || []).find(
         (item) => String(item.name || "").trim().toLowerCase() === String(customerName || "").trim().toLowerCase()
@@ -4051,6 +4181,7 @@ export const App = () => {
         }
       }
       const sale = await submitSale({
+        requestId: createSaleRequestId(),
         cashier,
         customerName,
         customerPhone: matchedCustomer?.phone ? String(matchedCustomer.phone).trim() : undefined,
@@ -4088,6 +4219,8 @@ export const App = () => {
       setDashboard(await fetchDashboard());
     } catch (error) {
       showErrorModal(error.message);
+    } finally {
+      setSavingCheckout(false);
     }
   };
 
@@ -4135,6 +4268,7 @@ export const App = () => {
         message={message}
         setMessage={setMessage}
         onSaleDeleted={applyLocalSaleDelete}
+        savingCheckout={savingCheckout}
         checkout={checkout}
       />
       ) : (

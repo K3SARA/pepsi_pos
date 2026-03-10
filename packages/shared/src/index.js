@@ -1,6 +1,6 @@
 export const DEFAULT_TAX_RATE = 0;
 
-export const PAYMENT_TYPES = ["cash", "card", "wallet", "credit"];
+export const PAYMENT_TYPES = ["cash", "card", "wallet", "credit", "cheque"];
 
 export const SOCKET_EVENTS = {
   STATE_SYNC: "state:sync",
