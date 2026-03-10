@@ -6,9 +6,10 @@ import { Server } from "socket.io";
 import { nanoid } from "nanoid";
 import { SOCKET_EVENTS } from "@pepsi/shared";
 import { enrichSale } from "./seed.js";
-import { getState, updateState } from "./store.js";
+import { getState, getStoreMeta, updateState } from "./store.js";
 import {
   extractSocketToken,
+  getAuthStoreMeta,
   listUsers,
   loginUser,
   requireAuth,
@@ -35,6 +36,49 @@ const sendFullSync = () => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, now: new Date().toISOString() });
+});
+
+app.get("/db/readonly", (req, res) => {
+  const token = String(req.query.token || req.headers["x-readonly-token"] || "").trim();
+  const expected = String(process.env.READONLY_DASHBOARD_TOKEN || "").trim();
+  if (!expected) {
+    res.status(503).json({ message: "READONLY_DASHBOARD_TOKEN is not configured" });
+    return;
+  }
+  if (!token || token !== expected) {
+    res.status(401).json({ message: "Invalid readonly token" });
+    return;
+  }
+
+  const state = getState();
+  const today = new Date().toISOString().slice(0, 10);
+  const todaySales = (state.sales || []).filter((sale) => String(sale.createdAt || "").slice(0, 10) === today);
+  const todayRevenue = todaySales.reduce((acc, sale) => acc + Number(sale.total || 0), 0);
+
+  res.json({
+    now: new Date().toISOString(),
+    storage: {
+      state: getStoreMeta(),
+      auth: getAuthStoreMeta()
+    },
+    counts: {
+      products: (state.products || []).length,
+      customers: (state.customers || []).length,
+      staff: (state.staff || []).length,
+      sales: (state.sales || []).length,
+      returns: (state.returns || []).length,
+      todaySales: todaySales.length,
+      todayRevenue: Number(todayRevenue.toFixed(2))
+    },
+    latestSales: (state.sales || []).slice(0, 20).map((sale) => ({
+      id: sale.id,
+      createdAt: sale.createdAt,
+      rep: sale.cashier || "-",
+      customer: sale.customerName || "-",
+      lorry: sale.lorry || "-",
+      total: Number(sale.total || 0)
+    }))
+  });
 });
 
 app.post("/auth/login", (req, res) => {

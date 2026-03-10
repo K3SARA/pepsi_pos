@@ -12,7 +12,7 @@ COPY apps/server apps/server
 COPY packages/shared packages/shared
 
 # Install only server + shared workspace dependencies
-RUN npm ci --omit=dev --workspace=packages/shared --workspace=apps/server --include-workspace-root
+RUN npm install --omit=dev --workspace=packages/shared --workspace=apps/server --include-workspace-root
 
 ENV NODE_ENV=production
 

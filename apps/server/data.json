@@ -14,7 +14,7 @@
       "price": 100,
       "billingPrice": 92,
       "mrp": 100,
-      "stock": 40
+      "stock": 14
     },
     {
       "id": "p-Z5VSCHCv",
@@ -36,7 +36,7 @@
       "price": 100,
       "billingPrice": 92,
       "mrp": 100,
-      "stock": 73
+      "stock": 23
     },
     {
       "id": "p-jXDUZOii",
@@ -53,7 +53,7 @@
       "id": "p-FSol18n8",
       "name": "Cream Soda",
       "size": "200 ml",
-      "sku": "CRSO200",
+      "sku": "CREAM200",
       "category": "Glass",
       "price": 100,
       "billingPrice": 92,
@@ -91,7 +91,7 @@
       "price": 500,
       "billingPrice": 468.55,
       "mrp": 500,
-      "stock": 75
+      "stock": 74
     },
     {
       "id": "p--Ik9Jxi4",
@@ -141,7 +141,7 @@
       "id": "p-tqa-dHWt",
       "name": "Cream Soda",
       "size": "1500 ml",
-      "sku": "CRSO1500",
+      "sku": "CREAM1500",
       "category": "Plastic",
       "price": 380,
       "billingPrice": 361,
@@ -218,7 +218,7 @@
       "id": "p-YPxqwX4E",
       "name": "Cream Soda",
       "size": "1000 ml",
-      "sku": "CRSO1000",
+      "sku": "CREAM1000",
       "category": "Plastic",
       "price": 250,
       "billingPrice": 237,
@@ -306,7 +306,7 @@
       "id": "p-WiwbgxT3",
       "name": "Cream Soda",
       "size": "400 ml",
-      "sku": "CRSO400",
+      "sku": "CREAM400",
       "category": "Plastic",
       "price": 150,
       "billingPrice": 138,
@@ -438,7 +438,7 @@
       "id": "p-GXt3mivc",
       "name": "Cream Soda",
       "size": "250 ml",
-      "sku": "CRSO250",
+      "sku": "CREAM250",
       "category": "Plastic",
       "price": 100,
       "billingPrice": 92.87,
@@ -514,6 +514,89 @@
   ],
   "sales": [
     {
+      "id": "00008",
+      "createdAt": "2026-03-09T16:01:51.855Z",
+      "cashier": "rep1",
+      "customerName": "Navin Jirasingha",
+      "lorry": "Lorry A",
+      "paymentType": "credit",
+      "notes": "",
+      "discount": 0,
+      "taxRate": 0,
+      "lines": [
+        {
+          "productId": "p-Z5VSCHCv",
+          "name": "Mountain Dew 200 ml",
+          "quantity": 50,
+          "price": 92
+        },
+        {
+          "productId": "p-x21U5bc6",
+          "name": "Ginger Beer 200 ml",
+          "quantity": 50,
+          "price": 92
+        }
+      ],
+      "subTotal": 9200,
+      "discountAmount": 0,
+      "taxable": 9200,
+      "tax": 0,
+      "total": 9200,
+      "paidAmount": 0,
+      "dueAmount": 9200,
+      "cashReceived": null,
+      "creditDueDate": "2026-03-30",
+      "outstandingAmount": 9200,
+      "deliveryAdjustments": [
+        {
+          "id": "81wljniU-aPj",
+          "createdAt": "2026-03-09T16:22:11.171Z",
+          "by": "admin",
+          "lines": [
+            {
+              "productId": "p-Z5VSCHCv",
+              "name": "Mountain Dew 200 ml",
+              "quantity": 50
+            }
+          ]
+        }
+      ],
+      "deliveryConfirmedAt": "2026-03-09T16:22:11.172Z",
+      "deliveryConfirmedBy": "admin"
+    },
+    {
+      "id": "00007",
+      "createdAt": "2026-03-09T09:43:47.549Z",
+      "cashier": "rep1",
+      "customerName": "Kevin",
+      "lorry": "Lorry B",
+      "paymentType": "credit",
+      "notes": "",
+      "discount": 0,
+      "taxRate": 0,
+      "lines": [
+        {
+          "productId": "p-3FWsPhiW",
+          "name": "Sting 200 ml",
+          "quantity": 26,
+          "price": 92
+        }
+      ],
+      "subTotal": 2392,
+      "discountAmount": 0,
+      "taxable": 2392,
+      "tax": 0,
+      "total": 2392,
+      "paidAmount": 0,
+      "dueAmount": 2392,
+      "cashReceived": null,
+      "creditDueDate": "2026-03-30",
+      "outstandingAmount": 2392,
+      "deliveryAdjustments": [],
+      "deliveryConfirmedAt": "2026-03-09T14:29:54.077Z",
+      "deliveryConfirmedBy": "admin"
+    },
+    {
       "id": "00006",
       "createdAt": "2026-03-07T22:38:10.698Z",
       "cashier": "rep1",
@@ -542,7 +625,7 @@
       "creditDueDate": "",
       "outstandingAmount": 1840,
       "deliveryAdjustments": [],
-      "deliveryConfirmedAt": "2026-03-07T22:56:25.299Z",
+      "deliveryConfirmedAt": "2026-03-09T14:29:48.807Z",
       "deliveryConfirmedBy": "admin"
     },
     {
@@ -678,7 +761,10 @@
       "dueAmount": 0,
       "cashReceived": 1137.88,
       "creditDueDate": "",
-      "outstandingAmount": 0
+      "outstandingAmount": 0,
+      "deliveryAdjustments": [],
+      "deliveryConfirmedAt": "2026-03-09T14:29:56.964Z",
+      "deliveryConfirmedBy": "admin"
     },
     {
       "id": "00002",
@@ -820,34 +906,13 @@
       "taxable": 9165.62,
       "tax": 0,
       "total": 9165.62,
-      "paidAmount": 9165.62,
-      "dueAmount": 0
-    },
-    {
-      "id": "KKzA8ojVG9Ow",
-      "createdAt": "2026-03-05T19:35:56.250Z",
-      "cashier": "rep1",
-      "customerName": "Shavinda",
-      "lorry": "Lorry A",
-      "paymentType": "cash",
-      "notes": "",
-      "discount": 0.5,
-      "taxRate": 0.08,
-      "lines": [
-        {
-          "productId": "p-001",
-          "name": "Pepsi 500ml",
-          "quantity": 1,
-          "price": 1.5
-        }
-      ],
-      "subTotal": 1.5,
-      "discountAmount": 0.5,
-      "taxable": 1,
-      "tax": 0.08,
-      "total": 1.08,
-      "paidAmount": 1.08,
-      "dueAmount": 0
+      "paidAmount": 0,
+      "dueAmount": 9165.62,
+      "outstandingAmount": 9165.62,
+      "cashReceived": 0,
+      "deliveryAdjustments": [],
+      "deliveryConfirmedAt": "2026-03-09T14:30:04.557Z",
+      "deliveryConfirmedBy": "admin"
     }
   ],
   "returns": [
@@ -894,6 +959,13 @@
       "phone": "07654865237",
       "address": "Matale",
       "createdAt": "2026-03-06T15:00:51.679Z"
+    },
+    {
+      "id": "ly6x3GiTYu7N",
+      "name": "Kevin",
+      "phone": "0876352749",
+      "address": "Matale",
+      "createdAt": "2026-03-09T09:42:01.706Z"
     }
   ],
   "staff": [

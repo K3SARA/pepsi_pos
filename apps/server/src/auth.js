@@ -4,12 +4,22 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import pg from "pg";
+const { Pool } = pg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const AUTH_FILE = process.env.AUTH_FILE
   ? path.resolve(process.env.AUTH_FILE)
   : path.join(__dirname, "..", "auth-data.json");
+
+const DATABASE_URL = process.env.DATABASE_URL || "";
+const USE_POSTGRES = Boolean(DATABASE_URL);
+const AUTH_TABLE = "auth_state_store";
+const pool = USE_POSTGRES ? new Pool({
+  connectionString: DATABASE_URL,
+  ssl: process.env.PGSSL_DISABLE === "true" ? false : { rejectUnauthorized: false }
+}) : null;
 
 const JWT_SECRET = process.env.JWT_SECRET || "change-me-in-env";
 const ACCESS_TOKEN_EXPIRES_IN = process.env.ACCESS_TOKEN_EXPIRES_IN || "15m";
@@ -28,34 +38,10 @@ const parseDurationMs = (value) => {
 const refreshTtlMs = parseDurationMs(REFRESH_TOKEN_EXPIRES_IN);
 
 const baselineUserSpecs = [
-  {
-    id: "user-admin",
-    role: "admin",
-    username: "admin",
-    name: "Admin User",
-    password: "admin123"
-  },
-  {
-    id: "user-rep-1",
-    role: "cashier",
-    username: "rep1",
-    name: "Rep 1",
-    password: "rep123"
-  },
-  {
-    id: "user-rep-2",
-    role: "cashier",
-    username: "rep2",
-    name: "Rep 2",
-    password: "rep123"
-  },
-  {
-    id: "user-rep-3",
-    role: "cashier",
-    username: "rep3",
-    name: "Rep 3",
-    password: "rep123"
-  }
+  { id: "user-admin", role: "admin", username: "admin", name: "Admin User", password: "admin123" },
+  { id: "user-rep-1", role: "cashier", username: "rep1", name: "Rep 1", password: "rep123" },
+  { id: "user-rep-2", role: "cashier", username: "rep2", name: "Rep 2", password: "rep123" },
+  { id: "user-rep-3", role: "cashier", username: "rep3", name: "Rep 3", password: "rep123" }
 ];
 
 const createBaselineUser = (spec) => ({
@@ -93,7 +79,6 @@ const normalizeUsers = (incomingUsers) => {
     }
   }
 
-  // Disable the old generic cashier login so only the 3 rep logins are used.
   for (const user of users) {
     if (user.role === "cashier" && user.username === "cashier" && user.active !== false) {
       user.active = false;
@@ -104,22 +89,29 @@ const normalizeUsers = (incomingUsers) => {
   return { users, changed };
 };
 
-const seedAuthState = {
-  users: defaultUsers,
-  refreshTokens: []
+const seedAuthState = { users: defaultUsers, refreshTokens: [] };
+
+const ensurePgAuthStore = async () => {
+  if (!pool) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS ${AUTH_TABLE} (
+      id SMALLINT PRIMARY KEY CHECK (id = 1),
+      state JSONB NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 };
 
-const writeAuthState = (state) => {
+const writeAuthStateFile = (state) => {
   fs.mkdirSync(path.dirname(AUTH_FILE), { recursive: true });
   fs.writeFileSync(AUTH_FILE, JSON.stringify(state, null, 2), "utf8");
 };
 
-const readAuthState = () => {
+const readAuthStateFile = () => {
   if (!fs.existsSync(AUTH_FILE)) {
-    writeAuthState(seedAuthState);
+    writeAuthStateFile(seedAuthState);
     return structuredClone(seedAuthState);
   }
-
   try {
     const parsed = JSON.parse(fs.readFileSync(AUTH_FILE, "utf8"));
     const sourceUsers = Array.isArray(parsed.users) && parsed.users.length ? parsed.users : defaultUsers;
@@ -128,20 +120,63 @@ const readAuthState = () => {
       users: normalized.users,
       refreshTokens: Array.isArray(parsed.refreshTokens) ? parsed.refreshTokens : []
     };
-    if (normalized.changed) writeAuthState(state);
+    if (normalized.changed) writeAuthStateFile(state);
     return state;
   } catch {
-    writeAuthState(seedAuthState);
+    writeAuthStateFile(seedAuthState);
     return structuredClone(seedAuthState);
   }
 };
 
-let cachedAuthState = readAuthState();
+const writeAuthStatePg = async (state) => {
+  if (!pool) return;
+  await ensurePgAuthStore();
+  await pool.query(`
+    INSERT INTO ${AUTH_TABLE} (id, state, updated_at)
+    VALUES (1, $1::jsonb, NOW())
+    ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW();
+  `, [JSON.stringify(state)]);
+};
+
+const readAuthStatePg = async () => {
+  if (!pool) return null;
+  await ensurePgAuthStore();
+  const result = await pool.query(`SELECT state FROM ${AUTH_TABLE} WHERE id = 1;`);
+  if (result.rows.length) {
+    const parsed = result.rows[0].state || {};
+    const sourceUsers = Array.isArray(parsed.users) && parsed.users.length ? parsed.users : defaultUsers;
+    const normalized = normalizeUsers(sourceUsers);
+    const state = {
+      users: normalized.users,
+      refreshTokens: Array.isArray(parsed.refreshTokens) ? parsed.refreshTokens : []
+    };
+    if (normalized.changed) await writeAuthStatePg(state);
+    return state;
+  }
+  const seed = readAuthStateFile();
+  await writeAuthStatePg(seed);
+  return seed;
+};
+
+let cachedAuthState = USE_POSTGRES ? await readAuthStatePg() : readAuthStateFile();
+let authWriteQueue = Promise.resolve();
+
+const persistAuthState = (state) => {
+  if (!USE_POSTGRES) {
+    writeAuthStateFile(state);
+    return;
+  }
+  authWriteQueue = authWriteQueue
+    .then(() => writeAuthStatePg(state))
+    .catch((error) => {
+      console.error("Postgres auth write failed:", error?.message || error);
+    });
+};
 
 const updateAuthState = (updater) => {
   const next = updater(structuredClone(cachedAuthState));
   cachedAuthState = next;
-  writeAuthState(next);
+  persistAuthState(next);
   return next;
 };
 
@@ -156,12 +191,7 @@ const sanitizeUser = (user) => ({
 
 const buildAccessToken = (user) =>
   jwt.sign(
-    {
-      sub: user.id,
-      role: user.role,
-      username: user.username,
-      name: user.name
-    },
+    { sub: user.id, role: user.role, username: user.username, name: user.name },
     JWT_SECRET,
     { expiresIn: ACCESS_TOKEN_EXPIRES_IN }
   );
@@ -173,14 +203,7 @@ const issueRefreshToken = (userId) => {
   const token = createRefreshTokenValue();
   const tokenHash = hashRefreshToken(token);
   const expiresAt = new Date(Date.now() + refreshTtlMs).toISOString();
-  const entry = {
-    id: crypto.randomUUID(),
-    userId,
-    tokenHash,
-    createdAt: nowIso(),
-    expiresAt,
-    revokedAt: null
-  };
+  const entry = { id: crypto.randomUUID(), userId, tokenHash, createdAt: nowIso(), expiresAt, revokedAt: null };
 
   updateAuthState((state) => {
     state.refreshTokens.push(entry);
@@ -193,9 +216,7 @@ const issueRefreshToken = (userId) => {
 const revokeTokenByHash = (tokenHash) => {
   updateAuthState((state) => {
     const token = state.refreshTokens.find((item) => item.tokenHash === tokenHash && !item.revokedAt);
-    if (token) {
-      token.revokedAt = nowIso();
-    }
+    if (token) token.revokedAt = nowIso();
     return state;
   });
 };
@@ -209,7 +230,6 @@ const resolveRefreshToken = (refreshToken) => {
 
   const user = state.users.find((item) => item.id === token.userId && item.active);
   if (!user) return null;
-
   return { token, user, tokenHash };
 };
 
@@ -224,12 +244,7 @@ export const loginUser = async ({ role, username, password }) => {
   const cleanUser = sanitizeUser(user);
   const accessToken = buildAccessToken(cleanUser);
   const refreshToken = issueRefreshToken(cleanUser.id);
-
-  return {
-    user: cleanUser,
-    accessToken,
-    refreshToken
-  };
+  return { user: cleanUser, accessToken, refreshToken };
 };
 
 export const rotateRefreshToken = (refreshToken) => {
@@ -237,7 +252,6 @@ export const rotateRefreshToken = (refreshToken) => {
   if (!resolved) return null;
 
   revokeTokenByHash(resolved.tokenHash);
-
   const cleanUser = sanitizeUser(resolved.user);
   return {
     user: cleanUser,
@@ -248,13 +262,17 @@ export const rotateRefreshToken = (refreshToken) => {
 
 export const revokeRefreshToken = (refreshToken) => {
   if (!refreshToken) return;
-  const tokenHash = hashRefreshToken(refreshToken);
-  revokeTokenByHash(tokenHash);
+  revokeTokenByHash(hashRefreshToken(refreshToken));
 };
 
 export const verifyAccessToken = (token) => jwt.verify(token, JWT_SECRET);
-
 export const listUsers = () => cachedAuthState.users.map(sanitizeUser);
+
+export const getAuthStoreMeta = () => ({
+  mode: USE_POSTGRES ? "postgres" : "file",
+  authFile: AUTH_FILE,
+  postgresTable: USE_POSTGRES ? AUTH_TABLE : null
+});
 
 export const requireAuth = (req, res, next) => {
   const header = req.headers.authorization || "";
@@ -263,7 +281,6 @@ export const requireAuth = (req, res, next) => {
     res.status(401).json({ message: "Missing access token" });
     return;
   }
-
   try {
     req.user = verifyAccessToken(token);
     next();
