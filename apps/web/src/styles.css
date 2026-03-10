@@ -2484,6 +2484,22 @@ button:disabled {
   background: #f8fbff;
 }
 
+.stock-clickable-row {
+  cursor: pointer;
+  transition: transform 130ms ease, box-shadow 130ms ease, border-color 130ms ease;
+}
+
+.stock-clickable-row:hover {
+  transform: translateY(-1px);
+  border-color: #c8d7ea !important;
+  box-shadow: 0 10px 20px rgba(26, 43, 70, 0.1);
+}
+
+.stock-clickable-row:focus-visible {
+  outline: 2px solid #3f7ed6;
+  outline-offset: 2px;
+}
+
 .stock-table-tech .row-danger {
   border-radius: 999px;
   padding: 0.34rem 0.62rem;
@@ -2503,6 +2519,134 @@ button:disabled {
   margin-bottom: 0.45rem;
   color: #19324e;
   letter-spacing: 0.15px;
+}
+
+.stock-summary-card {
+  margin-bottom: 0.62rem;
+  border: 1px solid #cedbec;
+  border-radius: 16px 22px 14px 20px;
+  background:
+    radial-gradient(135% 130% at 100% 0%, rgba(118, 168, 255, 0.18) 0%, rgba(118, 168, 255, 0) 60%),
+    linear-gradient(180deg, #fbfdff 0%, #edf4fc 100%);
+  padding: 0.78rem;
+  box-shadow: 0 14px 24px rgba(19, 40, 67, 0.1);
+}
+
+.stock-summary-divider {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  margin: 0 0 0.52rem;
+}
+
+.stock-summary-divider::before {
+  content: "";
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(31, 73, 130, 0.12) 0%, rgba(31, 73, 130, 0.42) 50%, rgba(31, 73, 130, 0.12) 100%);
+}
+
+.stock-summary-divider span {
+  position: relative;
+  z-index: 1;
+  font-size: 0.62rem;
+  letter-spacing: 1.05px;
+  font-weight: 800;
+  color: #355277;
+  background: #edf4fd;
+  border: 1px solid #d4dff0;
+  border-radius: 999px;
+  padding: 0.12rem 0.46rem;
+  transform: rotate(-1deg);
+}
+
+.stock-summary-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.55rem;
+}
+
+.stock-summary-head h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: #11263f;
+}
+
+.stock-summary-head p {
+  margin: 0;
+  color: #5a6d85;
+  font-size: 0.72rem;
+}
+
+.stock-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 0.42rem;
+}
+
+.stock-summary-grid article,
+.stock-summary-foot article {
+  border: 1px solid #d6e0ee;
+  border-radius: 12px;
+  background: #fff;
+  padding: 0.48rem 0.54rem;
+}
+
+.stock-summary-grid article span,
+.stock-summary-foot article span {
+  display: block;
+  color: #5a6d85;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.stock-summary-grid article strong,
+.stock-summary-foot article strong {
+  display: block;
+  margin-top: 0.2rem;
+  color: #11263f;
+  font-size: 1.02rem;
+}
+
+.stock-summary-grid article.warn {
+  border-color: #efcccc;
+  background: #fff8f8;
+}
+
+.stock-summary-grid article.warn strong,
+.stock-summary-grid article.warn span {
+  color: #932020;
+}
+
+.stock-summary-grid article.warn.soft {
+  background: #fff4f4;
+}
+
+.stock-summary-foot {
+  margin-top: 0.48rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.1fr;
+  gap: 0.42rem;
+}
+
+.stock-summary-foot article.highlight {
+  background:
+    radial-gradient(120% 120% at 100% 0%, rgba(92, 145, 244, 0.14) 0%, rgba(92, 145, 244, 0) 66%),
+    linear-gradient(180deg, #f9fcff 0%, #edf4fd 100%);
+  border-color: #cbd9ed;
+}
+
+.stock-summary-foot article p {
+  margin: 0.18rem 0 0;
+  color: #46607d;
+  font-size: 0.76rem;
 }
 
 .customer-detail-modal {
@@ -3382,6 +3526,37 @@ button:disabled {
   .stock-table-tech {
     --stock-cols: 0.95fr 0.9fr 0.84fr 0.56fr 0.72fr;
     padding: 0.28rem;
+  }
+
+  .stock-summary-card {
+    padding: 0.62rem;
+  }
+
+  .stock-summary-divider::before {
+    left: 10px;
+    right: 10px;
+    height: 5px;
+  }
+
+  .stock-summary-divider span {
+    font-size: 0.55rem;
+  }
+
+  .stock-summary-head {
+    display: block;
+    margin-bottom: 0.48rem;
+  }
+
+  .stock-summary-head p {
+    margin-top: 0.12rem;
+  }
+
+  .stock-summary-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .stock-summary-foot {
+    grid-template-columns: 1fr;
   }
 
   .stock-table-tech header,

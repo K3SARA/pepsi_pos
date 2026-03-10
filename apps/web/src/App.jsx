@@ -1514,6 +1514,34 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     }),
     [filteredStockRows, tableSort]
   );
+  const stockPageSummary = useMemo(() => {
+    const rows = sortedStockRows || [];
+    const totalSkus = rows.length;
+    const totalUnits = rows.reduce((acc, row) => acc + Number(row.stock || 0), 0);
+    const lowStockThreshold = Number(state?.settings?.lowStockThreshold ?? 25);
+    const lowStockCount = rows.filter((row) => Number(row.stock || 0) <= lowStockThreshold).length;
+    const outOfStockCount = rows.filter((row) => Number(row.stock || 0) <= 0).length;
+    const inventoryCost = Number(rows.reduce((acc, row) => (
+      acc + (Number(row.stock || 0) * Number(row.billingPrice ?? row.price ?? 0))
+    ), 0).toFixed(2));
+    const inventoryMrp = Number(rows.reduce((acc, row) => (
+      acc + (Number(row.stock || 0) * Number(row.mrp ?? row.price ?? 0))
+    ), 0).toFixed(2));
+    const topStockItem = rows.reduce(
+      (best, row) => (Number(row.stock || 0) > Number(best?.stock || -1) ? row : best),
+      null
+    );
+    return {
+      totalSkus,
+      totalUnits,
+      lowStockCount,
+      outOfStockCount,
+      inventoryCost,
+      inventoryMrp,
+      topStockName: topStockItem?.name || topStockItem?.sku || "-",
+      topStockUnits: Number(topStockItem?.stock || 0)
+    };
+  }, [sortedStockRows, state?.settings?.lowStockThreshold]);
 
   const adminReturnRows = useMemo(() => {
     const rows = [];
@@ -2029,6 +2057,23 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     setShowStockForm(true);
   };
 
+  const openStockEditByRow = (row) => {
+    if (!row) return;
+    const matched = (state.products || []).find((item) => item.id === row.id);
+    if (!matched) {
+      setNotice("Selected stock item was not found.");
+      return;
+    }
+    setStockMode("edit");
+    setStockForm({
+      productId: matched.id,
+      quantity: "",
+      stock: String(matched.stock ?? ""),
+      sku: matched.sku || ""
+    });
+    setShowStockForm(true);
+  };
+
   const onStockProductChange = (productId) => {
     const selected = state.products.find((item) => item.id === productId);
     setStockForm((current) => ({
@@ -2475,6 +2520,48 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 onChange={(e) => setStockPanelSearch(e.target.value)}
                 placeholder="Search product / SKU / size"
               />
+              <section className="stock-summary-card">
+                <div className="stock-summary-divider">
+                  <span>STOCK SUMMARY</span>
+                </div>
+                <div className="stock-summary-head">
+                  <h3>Inventory Snapshot</h3>
+                  <p>Live from current filtered stock</p>
+                </div>
+                <div className="stock-summary-grid">
+                  <article>
+                    <span>Total SKUs</span>
+                    <strong>{stockPageSummary.totalSkus}</strong>
+                  </article>
+                  <article>
+                    <span>Total Units</span>
+                    <strong>{stockPageSummary.totalUnits}</strong>
+                  </article>
+                  <article className="warn">
+                    <span>Low Stock</span>
+                    <strong>{stockPageSummary.lowStockCount}</strong>
+                  </article>
+                  <article className="warn soft">
+                    <span>Out of Stock</span>
+                    <strong>{stockPageSummary.outOfStockCount}</strong>
+                  </article>
+                </div>
+                <div className="stock-summary-foot">
+                  <article>
+                    <span>Inventory Cost (LKR)</span>
+                    <strong>{stockPageSummary.inventoryCost.toFixed(2)}</strong>
+                  </article>
+                  <article>
+                    <span>Inventory MRP (LKR)</span>
+                    <strong>{stockPageSummary.inventoryMrp.toFixed(2)}</strong>
+                  </article>
+                  <article className="highlight">
+                    <span>Highest Stock</span>
+                    <strong>{stockPageSummary.topStockName}</strong>
+                    <p>{stockPageSummary.topStockUnits} units</p>
+                  </article>
+                </div>
+              </section>
               <div className="admin-table stock-table stock-table-tech">
                 <header>
                   <button type="button" className="th-sort" onClick={() => toggleSort("stock", "sku")}>SKU{sortMark("stock", "sku")}</button>
@@ -2484,13 +2571,33 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   <span className="th-action">Action</span>
                 </header>
                 {sortedStockRows.map((item) => (
-                  <article key={item.id}>
+                  <article
+                    key={item.id}
+                    className="stock-clickable-row"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openStockEditByRow(item)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openStockEditByRow(item);
+                      }
+                    }}
+                  >
                     <span>{item.sku}</span>
                     <span>{Number(item.billingPrice ?? item.price ?? 0).toFixed(2)}</span>
                     <span>{Number(item.mrp ?? item.price ?? 0).toFixed(2)}</span>
                     <span className={item.stock <= 25 ? "low" : ""}>{item.stock}</span>
                     <span className="action-cell">
-                      <button type="button" className="row-danger" onClick={() => deleteStockProductById(item)} disabled={deletingProduct}>
+                      <button
+                        type="button"
+                        className="row-danger"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteStockProductById(item);
+                        }}
+                        disabled={deletingProduct}
+                      >
                         Delete
                       </button>
                     </span>
