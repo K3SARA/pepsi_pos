@@ -2105,6 +2105,40 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     setShowStockSuggestions(false);
   };
 
+  const exportStockReport = () => {
+    try {
+      const rows = (sortedStockRows || []).map((item) => ({
+        sku: String(item.sku || ""),
+        billingPrice: Number(item.billingPrice ?? item.price ?? 0).toFixed(2),
+        mrp: Number(item.mrp ?? item.price ?? 0).toFixed(2),
+        stock: Number(item.stock || 0)
+      }));
+      const header = ["SKU", "Billing Price (LKR)", "MRP (LKR)", "Stock"];
+      const csvRows = [
+        header.join(","),
+        ...rows.map((row) => [
+          `"${String(row.sku).replace(/"/g, '""')}"`,
+          row.billingPrice,
+          row.mrp,
+          row.stock
+        ].join(","))
+      ];
+      const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const dateTag = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `stock-report-${dateTag}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      setNotice("Stock report exported.");
+    } catch (error) {
+      setNotice(error.message || "Unable to export stock report.");
+    }
+  };
+
   const saveStock = async () => {
     try {
       const selected = state.products.find((item) => item.id === stockForm.productId);
@@ -2504,6 +2538,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 <div className="admin-page-actions stock-current-actions stock-actions-tech">
                   <button type="button" onClick={openStockAdd}>Add Stock</button>
                   <button type="button" onClick={openStockEdit}>Edit Stock</button>
+                  <button type="button" onClick={exportStockReport}>Export Stock</button>
                   <button type="button" onClick={() => stockFileRef.current?.click()}>Import Stock</button>
                   <input
                     ref={stockFileRef}
