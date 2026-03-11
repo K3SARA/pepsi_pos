@@ -1488,7 +1488,7 @@ const CashierView = ({
   );
 };
 
-const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
+const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleDeleted }) => {
   const [showLowStock, setShowLowStock] = useState(false);
   const [selectedRep, setSelectedRep] = useState("");
   const [chartDateFrom, setChartDateFrom] = useState("");
@@ -2426,7 +2426,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
       if (!ok) return;
       setDeletingSaleId(String(sale.id));
       await deleteSale(sale.id);
-      applyLocalSaleDelete(sale.id);
+      onSaleDeleted?.(sale.id);
       setNotice(`Sale #${sale.id} deleted.`);
       if (editingAdminSaleId && String(editingAdminSaleId) === String(sale.id)) {
         setEditingAdminSaleId("");
@@ -4890,7 +4890,8 @@ export const App = () => {
             message={message}
             onError={showErrorModal}
             requestConfirm={requestConfirm}
-          />
+            onSaleDeleted={applyLocalSaleDelete}
+        />
         )}
         {errorModal ? (
           <div className="low-stock-modal" onClick={() => setErrorModal("")}>
