@@ -19,6 +19,99 @@ import {
   verifyAccessToken
 } from "./auth.js";
 
+const normalizeSalePayments = (sale) => {
+  const explicit = Array.isArray(sale?.payments) ? sale.payments : [];
+  if (explicit.length) return explicit;
+  const migrated = [];
+  if (Number(sale?.cashReceived || 0) > 0) {
+    migrated.push({
+      id: `legacy-cash-${sale.id || "sale"}`,
+      method: "cash",
+      amount: Number(Number(sale.cashReceived || 0).toFixed(2)),
+      createdAt: sale.deliveryConfirmedAt || sale.createdAt || new Date().toISOString(),
+      receivedBy: sale.deliveryConfirmedBy || sale.cashier || "system"
+    });
+  }
+  if (Number(sale?.chequeAmount || 0) > 0) {
+    migrated.push({
+      id: `legacy-cheque-${sale.id || "sale"}`,
+      method: "cheque",
+      amount: Number(Number(sale.chequeAmount || 0).toFixed(2)),
+      chequeNo: sale.chequeNo || "",
+      chequeDate: sale.chequeDate || "",
+      chequeBank: sale.chequeBank || "",
+      createdAt: sale.deliveryConfirmedAt || sale.createdAt || new Date().toISOString(),
+      receivedBy: sale.deliveryConfirmedBy || sale.cashier || "system"
+    });
+  }
+  return migrated;
+};
+
+const roundMoney = (value) => Number(Number(value || 0).toFixed(2));
+
+const totalPaymentsAmount = (payments = []) => roundMoney(
+  payments.reduce((acc, payment) => acc + Number(payment.amount || 0), 0)
+);
+
+const recalculateSaleFinancials = (sale) => {
+  const payments = normalizeSalePayments(sale);
+  const cashPayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cash");
+  const chequePayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cheque");
+  const totalCash = totalPaymentsAmount(cashPayments);
+  const totalCheque = totalPaymentsAmount(chequePayments);
+  const latestCheque = chequePayments.length ? chequePayments[chequePayments.length - 1] : null;
+  const returnedAmount = roundMoney(sale.returnedAmount || 0);
+  const netTotalAfterReturns = roundMoney(Math.max(0, Number(sale.total || 0) - returnedAmount));
+  const rawPaid = roundMoney(totalCash + totalCheque);
+  const paidAmount = roundMoney(Math.min(netTotalAfterReturns, rawPaid));
+  const outstandingAmount = roundMoney(Math.max(0, netTotalAfterReturns - paidAmount));
+  const refundDueAmount = roundMoney(Math.max(0, rawPaid - netTotalAfterReturns));
+
+  return {
+    ...sale,
+    payments,
+    cashReceived: totalCash > 0 ? totalCash : null,
+    chequeAmount: totalCheque > 0 ? totalCheque : null,
+    chequeNo: latestCheque?.chequeNo || "",
+    chequeDate: latestCheque?.chequeDate || "",
+    chequeBank: latestCheque?.chequeBank || "",
+    returnedAmount,
+    netTotalAfterReturns,
+    paidAmount,
+    outstandingAmount,
+    dueAmount: outstandingAmount,
+    refundDueAmount
+  };
+};
+
+const buildReturnLineFinancials = ({ sale, soldLine, quantity }) => {
+  const qty = Number(quantity || 0);
+  const soldQty = Number(soldLine?.quantity || 0);
+  const soldUnitPrice = roundMoney(soldLine?.price || 0);
+  const baseUnitPrice = roundMoney(soldLine?.basePrice ?? soldUnitPrice);
+  const grossAmount = roundMoney(soldUnitPrice * qty);
+  const saleSubTotal = Number(sale?.subTotal || 0);
+  const proportionalBillDiscount = saleSubTotal > 0
+    ? roundMoney(Number(sale?.discountAmount || sale?.discount || 0) * (grossAmount / saleSubTotal))
+    : 0;
+  const returnAmount = roundMoney(Math.max(0, grossAmount - proportionalBillDiscount));
+  const unitItemDiscount = roundMoney(Math.max(0, baseUnitPrice - soldUnitPrice));
+
+  return {
+    quantity: qty,
+    baseUnitPrice,
+    soldUnitPrice,
+    unitItemDiscount,
+    itemDiscountMode: soldLine?.itemDiscountMode || "amount",
+    itemDiscountValue: roundMoney(soldLine?.itemDiscount || 0),
+    grossAmount,
+    billDiscountShare: proportionalBillDiscount,
+    returnAmount,
+    returnUnitPrice: qty > 0 ? roundMoney(returnAmount / qty) : 0,
+    returnRatio: soldQty > 0 ? roundMoney(qty / soldQty) : 0
+  };
+};
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -141,11 +234,12 @@ app.post("/products", requireAuth, requireRole("admin"), (req, res) => {
   const sku = String(body.sku || "").trim();
   const category = String(body.category || "General").trim();
   const billingPrice = Number(body.billingPrice);
+  const invoicePrice = body.invoicePrice !== undefined ? Number(body.invoicePrice) : 0;
   const mrp = Number(body.mrp);
   const stock = Number(body.stock);
 
-  if (!name || !sku || Number.isNaN(billingPrice) || Number.isNaN(mrp) || Number.isNaN(stock)) {
-    res.status(400).json({ message: "name, sku, billingPrice, mrp, stock are required" });
+  if (!name || !sku || Number.isNaN(billingPrice) || Number.isNaN(mrp) || Number.isNaN(stock) || Number.isNaN(invoicePrice)) {
+    res.status(400).json({ message: "name, sku, invoicePrice, billingPrice, mrp, stock are required" });
     return;
   }
 
@@ -162,10 +256,11 @@ app.post("/products", requireAuth, requireRole("admin"), (req, res) => {
     size,
     sku,
     category: category || "General",
-    price: mrp,
-    billingPrice,
-    mrp,
-    stock
+      price: mrp,
+      invoicePrice,
+      billingPrice,
+      mrp,
+      stock
   };
 
   updateState((draft) => {
@@ -202,9 +297,10 @@ app.patch("/products/:id", requireAuth, requireRole("admin"), (req, res) => {
       ...state.products[index],
       ...patch,
       size: patch.size !== undefined ? String(patch.size || "").trim() : state.products[index].size,
-      sku: incomingSku ?? state.products[index].sku,
-      billingPrice: patch.billingPrice !== undefined ? Number(patch.billingPrice) : state.products[index].billingPrice,
-      mrp: patch.mrp !== undefined ? Number(patch.mrp) : state.products[index].mrp,
+        sku: incomingSku ?? state.products[index].sku,
+        invoicePrice: patch.invoicePrice !== undefined ? Number(patch.invoicePrice) : (state.products[index].invoicePrice ?? 0),
+        billingPrice: patch.billingPrice !== undefined ? Number(patch.billingPrice) : state.products[index].billingPrice,
+        mrp: patch.mrp !== undefined ? Number(patch.mrp) : state.products[index].mrp,
       price: patch.price !== undefined ? Number(patch.price) : state.products[index].price,
       stock: patch.stock !== undefined ? Number(patch.stock) : state.products[index].stock
     };
@@ -460,69 +556,19 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
     notes: body.notes || "",
     discount: Number(body.discount || 0),
     taxRate: 0,
+    payments: [],
     lines: preparedLines
   });
 
-  if (paymentType === "cash") {
-    if (!Number.isFinite(cashReceived) || cashReceived < 0) {
-      res.status(400).json({ message: "Cash received must be 0 or more" });
-      return;
-    }
-    const paid = Math.min(Number(prepared.total || 0), Number(cashReceived || 0));
-    prepared.cashReceived = Number(cashReceived.toFixed(2));
-    prepared.creditDueDate = "";
-    prepared.chequeAmount = null;
+  prepared.cashReceived = null;
+  prepared.creditDueDate = creditDueDate || "";
+  prepared.chequeAmount = null;
     prepared.chequeNo = "";
     prepared.chequeDate = "";
     prepared.chequeBank = "";
-    prepared.paidAmount = Number(paid.toFixed(2));
-    prepared.outstandingAmount = Number((Number(prepared.total || 0) - paid).toFixed(2));
-  } else if (paymentType === "credit") {
-    if (!creditDueDate) {
-      res.status(400).json({ message: "Credit due date is required" });
-      return;
-    }
-    prepared.cashReceived = null;
-    prepared.creditDueDate = creditDueDate;
-    prepared.chequeAmount = null;
-    prepared.chequeNo = "";
-    prepared.chequeDate = "";
-    prepared.chequeBank = "";
-    prepared.paidAmount = 0;
-    prepared.outstandingAmount = Number(prepared.total || 0);
-  } else if (paymentType === "cheque") {
-    if (!Number.isFinite(chequeAmount) || chequeAmount < 0) {
-      res.status(400).json({ message: "Cheque amount must be 0 or more" });
-      return;
-    }
-    if (!chequeNo) {
-      res.status(400).json({ message: "Cheque number is required" });
-      return;
-    }
-    if (!chequeDate) {
-      res.status(400).json({ message: "Cheque date is required" });
-      return;
-    }
-    const paid = Math.min(Number(prepared.total || 0), Number(chequeAmount || 0));
-    prepared.cashReceived = null;
-    prepared.creditDueDate = "";
-    prepared.chequeAmount = Number(chequeAmount.toFixed(2));
-    prepared.chequeNo = chequeNo;
-    prepared.chequeDate = chequeDate;
-    prepared.chequeBank = chequeBank;
-    prepared.paidAmount = Number(paid.toFixed(2));
-    prepared.outstandingAmount = Number((Number(prepared.total || 0) - paid).toFixed(2));
-  } else {
-    prepared.cashReceived = null;
-    prepared.creditDueDate = "";
-    prepared.chequeAmount = null;
-    prepared.chequeNo = "";
-    prepared.chequeDate = "";
-    prepared.chequeBank = "";
-    prepared.paidAmount = Number(prepared.total || 0);
-    prepared.outstandingAmount = 0;
-  }
-  prepared.dueAmount = Number(Math.max(0, Number(prepared.total || 0) - Number(prepared.paidAmount || 0)).toFixed(2));
+    prepared.returnedAmount = 0;
+    prepared.refundDueAmount = 0;
+    Object.assign(prepared, recalculateSaleFinancials(prepared));
 
   const next = updateState((draft) => {
     draft.sales.unshift(prepared);
@@ -656,31 +702,15 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
     }
   }
 
-  let paidAmount = Number(sale.paidAmount || sale.total || 0);
-  if (sale.paymentType === "credit") paidAmount = 0;
-  if (sale.paymentType === "cash") {
-    paidAmount = Number(sale.cashReceived || paidAmount || 0);
-  }
+    const existingPayments = normalizeSalePayments(sale);
 
-  const recalculated = enrichSale({
-    ...sale,
-    lines: preparedLines,
-    taxRate: 0,
-    paidAmount
-  });
-  if (sale.paymentType === "credit") {
-    recalculated.outstandingAmount = Number(recalculated.total || 0);
-    recalculated.paidAmount = 0;
-  } else if (sale.paymentType === "cash") {
-    const paid = Math.min(Number(recalculated.total || 0), Number(sale.cashReceived || 0));
-    recalculated.paidAmount = Number(paid.toFixed(2));
-    recalculated.outstandingAmount = Number((Number(recalculated.total || 0) - paid).toFixed(2));
-    recalculated.cashReceived = Number(sale.cashReceived || 0);
-  } else {
-    recalculated.paidAmount = Number(recalculated.total || 0);
-    recalculated.outstandingAmount = 0;
-  }
-  recalculated.dueAmount = Number(Math.max(0, Number(recalculated.total || 0) - Number(recalculated.paidAmount || 0)).toFixed(2));
+      const recalculated = recalculateSaleFinancials(enrichSale({
+        ...sale,
+        paymentType: nextPaymentType || sale.paymentType,
+        payments: existingPayments,
+        lines: preparedLines,
+        taxRate: 0
+      }));
 
   const next = updateState((draft) => {
     const idx = draft.sales.findIndex((item) => String(item.id) === String(id));
@@ -810,34 +840,52 @@ app.post("/returns", requireAuth, requireRole("cashier", "admin"), (req, res) =>
       res.status(409).json({ message: `Return exceeds remaining qty for ${soldLine.name}` });
       return;
     }
-    preparedLines.push({
-      productId,
-      name: soldLine.name,
-      quantity,
-      condition
-    });
-  }
-
-  const record = {
-    id: nanoid(12),
-    saleId,
-    rep: req.user.username,
-    createdAt: new Date().toISOString(),
-    lines: preparedLines
-  };
-
-  const next = updateState((draft) => {
-    draft.returns = draft.returns || [];
-    draft.returns.unshift(record);
-    for (const line of preparedLines) {
-      if (line.condition !== "good") continue;
-      const product = draft.products.find((item) => item.id === line.productId);
-      if (product) {
-        product.stock = Number((Number(product.stock || 0) + Number(line.quantity || 0)).toFixed(2));
-      }
+      const financials = buildReturnLineFinancials({ sale, soldLine, quantity });
+      preparedLines.push({
+        productId,
+        name: soldLine.name,
+        quantity,
+        condition,
+        baseUnitPrice: financials.baseUnitPrice,
+        soldUnitPrice: financials.soldUnitPrice,
+        unitItemDiscount: financials.unitItemDiscount,
+        itemDiscountMode: financials.itemDiscountMode,
+        itemDiscountValue: financials.itemDiscountValue,
+        grossAmount: financials.grossAmount,
+        billDiscountShare: financials.billDiscountShare,
+        returnUnitPrice: financials.returnUnitPrice,
+        returnAmount: financials.returnAmount
+      });
     }
-    return draft;
-  });
+
+    const returnTotalAmount = roundMoney(preparedLines.reduce((acc, line) => acc + Number(line.returnAmount || 0), 0));
+    const record = {
+      id: nanoid(12),
+      saleId,
+      rep: req.user.username,
+      createdAt: new Date().toISOString(),
+      totalAmount: returnTotalAmount,
+      lines: preparedLines
+    };
+
+    const next = updateState((draft) => {
+      draft.returns = draft.returns || [];
+      draft.returns.unshift(record);
+      for (const line of preparedLines) {
+        if (line.condition !== "good") continue;
+        const product = draft.products.find((item) => item.id === line.productId);
+        if (product) {
+          product.stock = Number((Number(product.stock || 0) + Number(line.quantity || 0)).toFixed(2));
+        }
+      }
+      const saleIndex = (draft.sales || []).findIndex((item) => String(item.id) === saleId);
+      if (saleIndex !== -1) {
+        const targetSale = draft.sales[saleIndex];
+        targetSale.returnedAmount = roundMoney(Number(targetSale.returnedAmount || 0) + returnTotalAmount);
+        draft.sales[saleIndex] = recalculateSaleFinancials(targetSale);
+      }
+      return draft;
+    });
 
   io.emit(SOCKET_EVENTS.INVENTORY_UPDATED, next.products);
   sendFullSync();
@@ -849,6 +897,11 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
   const body = req.body || {};
   const incomingLines = Array.isArray(body.lines) ? body.lines : [];
   const markConfirmed = body.markConfirmed !== false;
+  const cashReceived = Number(body.cashReceived || 0);
+  const chequeAmount = Number(body.chequeAmount || 0);
+  const chequeNo = String(body.chequeNo || "").trim();
+  const chequeDate = String(body.chequeDate || "").trim();
+  const chequeBank = String(body.chequeBank || "").trim();
 
   const state = getState();
   const sale = (state.sales || []).find((item) => String(item.id) === String(id));
@@ -905,6 +958,39 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
     });
   }
 
+    const existingPayments = normalizeSalePayments(sale);
+    if (markConfirmed) {
+    if (!Number.isFinite(cashReceived) || cashReceived < 0) {
+      res.status(400).json({ message: "Cash received must be 0 or more" });
+      return;
+    }
+    if (!Number.isFinite(chequeAmount) || chequeAmount < 0) {
+      res.status(400).json({ message: "Cheque amount must be 0 or more" });
+      return;
+    }
+    if (chequeAmount > 0) {
+      if (!chequeNo) {
+        res.status(400).json({ message: "Cheque number is required" });
+        return;
+      }
+      if (!chequeDate) {
+        res.status(400).json({ message: "Cheque date is required" });
+        return;
+      }
+      if (!chequeBank) {
+        res.status(400).json({ message: "Cheque bank is required" });
+        return;
+      }
+    }
+      const existingPaid = totalPaymentsAmount(existingPayments);
+      const maxCollectible = roundMoney(Math.max(0, Number(sale.total || 0) - Number(sale.returnedAmount || 0)));
+      const totalPaid = existingPaid + Number(cashReceived || 0) + Number(chequeAmount || 0);
+      if (totalPaid > maxCollectible) {
+        res.status(409).json({ message: "Cash and cheque total cannot exceed bill total" });
+        return;
+      }
+  }
+
   const adjustmentRecord = preparedLines.length ? {
     id: nanoid(12),
     createdAt: new Date().toISOString(),
@@ -925,12 +1011,35 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
         product.stock = Number((Number(product.stock || 0) + Number(line.quantity || 0)).toFixed(2));
       }
     }
-    if (markConfirmed) {
-      target.deliveryConfirmedAt = new Date().toISOString();
-      target.deliveryConfirmedBy = req.user?.username || "admin";
-    }
-    return draft;
-  });
+      if (markConfirmed) {
+        target.payments = normalizeSalePayments(target);
+        if (cashReceived > 0) {
+          target.payments.push({
+            id: nanoid(12),
+          method: "cash",
+          amount: Number(cashReceived.toFixed(2)),
+          createdAt: new Date().toISOString(),
+          receivedBy: req.user?.username || "admin"
+        });
+      }
+      if (chequeAmount > 0) {
+        target.payments.push({
+          id: nanoid(12),
+          method: "cheque",
+          amount: Number(chequeAmount.toFixed(2)),
+          chequeNo,
+          chequeDate,
+          chequeBank,
+          createdAt: new Date().toISOString(),
+            receivedBy: req.user?.username || "admin"
+          });
+        }
+        target.deliveryConfirmedAt = new Date().toISOString();
+        target.deliveryConfirmedBy = req.user?.username || "admin";
+        draft.sales[idx] = recalculateSaleFinancials(target);
+      }
+      return draft;
+    });
 
   io.emit(SOCKET_EVENTS.INVENTORY_UPDATED, next.products);
   sendFullSync();

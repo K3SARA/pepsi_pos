@@ -118,8 +118,68 @@ const editableLineDiscountValue = (line) => {
   if (!Number.isFinite(raw) || raw <= 0) return 0;
   return Math.min(raw, base);
 };
+const salePayments = (sale) => {
+  const explicit = Array.isArray(sale?.payments) ? sale.payments : [];
+  if (explicit.length) return explicit;
+  const migrated = [];
+  if (Number(sale?.cashReceived || 0) > 0) {
+    migrated.push({
+      id: `legacy-cash-${sale?.id || "sale"}`,
+      method: "cash",
+      amount: Number(sale.cashReceived || 0),
+      createdAt: sale?.deliveryConfirmedAt || sale?.createdAt || new Date().toISOString(),
+      receivedBy: sale?.deliveryConfirmedBy || sale?.cashier || "-"
+    });
+  }
+  if (Number(sale?.chequeAmount || 0) > 0) {
+    migrated.push({
+      id: `legacy-cheque-${sale?.id || "sale"}`,
+      method: "cheque",
+      amount: Number(sale.chequeAmount || 0),
+      chequeNo: sale?.chequeNo || "",
+      chequeDate: sale?.chequeDate || "",
+      chequeBank: sale?.chequeBank || "",
+      createdAt: sale?.deliveryConfirmedAt || sale?.createdAt || new Date().toISOString(),
+      receivedBy: sale?.deliveryConfirmedBy || sale?.cashier || "-"
+    });
+  }
+  return migrated;
+};
+const returnLinePreview = (sale, line, quantity = 0) => {
+  const qty = Number(quantity || 0);
+  const soldQty = Number(line?.quantity || 0);
+  if (!Number.isFinite(qty) || qty <= 0 || !Number.isFinite(soldQty) || soldQty <= 0) {
+    return { grossAmount: 0, billDiscountShare: 0, returnAmount: 0, unitAmount: 0 };
+  }
+  const soldUnitPrice = Number(line?.price || 0);
+  const grossAmount = Number((soldUnitPrice * qty).toFixed(2));
+  const saleSubTotal = Number(sale?.subTotal || 0);
+  const billDiscountShare = saleSubTotal > 0
+    ? Number((Number(sale?.discountAmount || sale?.discount || 0) * (grossAmount / saleSubTotal)).toFixed(2))
+    : 0;
+  const returnAmount = Number(Math.max(0, grossAmount - billDiscountShare).toFixed(2));
+  return {
+    grossAmount,
+    billDiscountShare,
+    returnAmount,
+    unitAmount: qty > 0 ? Number((returnAmount / qty).toFixed(2)) : 0
+  };
+};
+const saleNetTotal = (sale) => Number(
+  Math.max(0, Number(sale?.netTotalAfterReturns ?? (Number(sale?.total || 0) - Number(sale?.returnedAmount || 0))))
+    .toFixed(2)
+);
 
-const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCustomerName = "", onPopupBlocked = () => {} }) => {
+const openSaleReceiptPrint = ({
+  sale,
+  customers = [],
+  products = [],
+  fallbackCustomerName = "",
+  onPopupBlocked = () => {},
+  returnByProduct = new Map(),
+  returnedAmountOverride = null,
+  totalOverride = null
+}) => {
   if (typeof window === "undefined" || !sale) return;
   const toMoney = (value) => formatLkrValue(value);
   const saleDate = new Date(sale?.createdAt || Date.now());
@@ -133,24 +193,53 @@ const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCus
   );
   const printedCustomerPhone = String(sale?.customerPhone || customer?.phone || "-").trim() || "-";
 
-  const baseLines = Array.isArray(sale?.lines) ? sale.lines : [];
-  const lines = baseLines.slice(0, 12).map((line) => {
-    const qty = Math.max(0, Number(line?.quantity || 0));
-    const product = (products || []).find((p) => p.id === line?.productId);
-    const billingPrice = Number(line?.basePrice ?? line?.price ?? product?.billingPrice ?? product?.price ?? 0);
-    const itemDiscount = lineItemDiscount(line);
-    const netUnit = Math.max(0, Number(line?.price ?? (billingPrice - itemDiscount)));
-    const sku = line?.sku || product?.sku || "";
-    return { sku, qty, billingPrice, itemDiscount, total: netUnit * qty };
-  });
+    const baseLines = Array.isArray(sale?.lines) ? sale.lines : [];
+    const lines = baseLines.slice(0, 12).map((line) => {
+      const returned = returnByProduct?.get?.(String(line?.productId || "")) || { qty: 0, amount: 0 };
+      const originalQty = Number(line?.quantity || 0);
+      const qty = Math.max(0, originalQty - Number(returned.qty || 0));
+      const product = (products || []).find((p) => p.id === line?.productId);
+      const billingPrice = Number(line?.basePrice ?? line?.price ?? product?.billingPrice ?? product?.price ?? 0);
+      const itemDiscount = lineItemDiscount(line);
+      const netUnit = Math.max(0, Number(line?.price ?? (billingPrice - itemDiscount)));
+      const sku = line?.sku || product?.sku || "";
+      const saleSubTotal = Number(sale?.subTotal || 0);
+      const grossRemaining = Number((netUnit * qty).toFixed(2));
+      const remainingBillDiscountShare = saleSubTotal > 0
+        ? Number((Number(sale?.discountAmount || sale?.discount || 0) * (grossRemaining / saleSubTotal)).toFixed(2))
+        : 0;
+      const total = Math.max(0, Number((grossRemaining - remainingBillDiscountShare).toFixed(2)));
+      return {
+        sku,
+        qty,
+        billingPrice,
+        itemDiscount,
+        billDiscountShare: remainingBillDiscountShare,
+        total,
+        returnedQty: Number(returned.qty || 0),
+        returnedAmount: Number(returned.amount || 0),
+        originalQty
+      };
+    }).filter((line) => line.qty > 0 || line.total > 0);
+
+    const returnedAmount = Number(
+      returnedAmountOverride !== null && returnedAmountOverride !== undefined
+        ? returnedAmountOverride
+        : sale?.returnedAmount || 0
+    );
+    const printedTotal = Number(
+      totalOverride !== null && totalOverride !== undefined
+        ? totalOverride
+        : saleNetTotal(sale)
+    );
 
   const minRows = 8;
   const rowsHtml = [...lines, ...Array.from({ length: Math.max(0, minRows - lines.length) }).map(() => null)]
     .map((line) => {
       if (!line) return "<tr><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>";
-      return `<tr><td>${escapeHtml(line.sku)}</td><td>${line.qty}</td><td>${toMoney(line.billingPrice)}</td><td>${toMoney(line.itemDiscount)}</td><td>${toMoney(line.total)}</td></tr>`;
-    })
-    .join("");
+        return `<tr><td>${escapeHtml(line.sku)}${line.returnedQty > 0 ? `<div class="return-print-note">Returned ${line.returnedQty}</div>` : ""}</td><td>${line.qty}</td><td>${toMoney(line.billingPrice)}</td><td>${toMoney(line.itemDiscount)}${line.billDiscountShare > 0 ? `<div class="return-print-note">Bill disc. ${toMoney(line.billDiscountShare)}</div>` : ""}</td><td>${toMoney(line.total)}${line.returnedAmount > 0 ? `<div class="return-print-note">- ${toMoney(line.returnedAmount)}</div>` : ""}</td></tr>`;
+      })
+      .join("");
 
   const printWindow = window.open("", "_blank", "width=1000,height=1300");
   if (!printWindow) {
@@ -165,11 +254,12 @@ const openSaleReceiptPrint = ({ sale, customers = [], products = [], fallbackCus
 .brand-title { text-align: center; font-weight: 900; font-size: 26px; line-height: 1.05; letter-spacing: 0.4px; text-transform: uppercase; }
 .brand-sub { margin: 10px auto 0; width: fit-content; background: #fff; border-radius: 14px; padding: 8px 20px; font-size: 22px; font-weight: 700; }
 .meta { margin-top: 12px; border: 1px solid #1f2937; border-radius: 16px; padding: 8px 10px; display: grid; grid-template-columns: 54px 1fr; gap: 12px; align-items: start; }
-.meta-box { border: 1px solid #1f2937; height: 76px; margin-top: 4px; } .meta-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.86fr); gap: 4px 20px; font-size: 16px; line-height: 1.2; align-items: start; }
-.dots { border-bottom: 1px dotted #222; min-width: 150px; display: inline-block; margin-left: 5px; } table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
-th, td { border: 1px solid #111; padding: 4px 6px; text-align: left; height: 26px; } th { background: #d9e0ea; font-size: 16px; font-weight: 800; text-transform: uppercase; }
-th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { text-align: center; }
-.totals-grid { margin-top: 14px; display: grid; grid-template-columns: 1fr 1.1fr; gap: 14px; } .totals-box, .summary-box { border: 1px solid #5b8de0; min-height: 92px; padding: 10px 12px; font-size: 18px; }
+  .meta-box { border: 1px solid #1f2937; height: 76px; margin-top: 4px; } .meta-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.86fr); gap: 4px 20px; font-size: 16px; line-height: 1.2; align-items: start; }
+  .dots { border-bottom: 1px dotted #222; min-width: 150px; display: inline-block; margin-left: 5px; } table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
+  th, td { border: 1px solid #111; padding: 4px 6px; text-align: left; height: 26px; } th { background: #d9e0ea; font-size: 16px; font-weight: 800; text-transform: uppercase; }
+  th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { text-align: center; }
+  .return-print-note { margin-top: 2px; color: #9f1d1d; font-size: 11px; font-weight: 700; line-height: 1.2; }
+  .totals-grid { margin-top: 14px; display: grid; grid-template-columns: 1fr 1.1fr; gap: 14px; } .totals-box, .summary-box { border: 1px solid #5b8de0; min-height: 92px; padding: 10px 12px; font-size: 18px; }
 .summary-box { background: #d9e0ea; border-color: #c8d0dc; } .summary-box strong { font-size: 24px; } .notes { margin-top: 16px; font-size: 18px; font-weight: 600; line-height: 1.45; }
 .notes li { margin-bottom: 3px; } .signatures { margin-top: 70px; display: grid; grid-template-columns: 1fr 1fr; gap: 30px; text-align: center; font-size: 18px; }
 .sign-line { margin-bottom: 8px; letter-spacing: 2px; } .powered { text-align: center; margin-top: 80px; font-size: 20px; }
@@ -177,7 +267,7 @@ th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child
 <div class="header"><div class="logo-wrap"><img src="/pepsi-logo.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
 <div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div></div><div>Invoice No : <span class="dots">${escapeHtml(sale?.id || "-")}</span></div></div></div>
 <table><thead><tr><th>Item Code</th><th>Qty</th><th>Billing Price</th><th>Item Discount</th><th>Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
-<div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(sale?.total)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div><div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div></div></div>
+ <div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(printedTotal)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div>${returnedAmount > 0 ? `<div>RETURNS : - LKR ${toMoney(returnedAmount)}</div>` : ""}<div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div></div></div>
 <ul class="notes"><li>Return or exchange only with this receipt</li><li>Credit Payment for all goods shall be made No later than 14 days</li></ul>
 <div class="signatures"><div><div class="sign-line">.......................................</div><div>Customer Signature</div><div>Rubber Stamp</div></div><div><div class="sign-line">.......................................</div><div>P.S.R Signature</div></div></div>
 <div class="powered">Powered By J&amp;Co.</div></div></body></html>`;
@@ -272,12 +362,14 @@ const CashierView = ({
   cart,
   setCart,
   totals,
-  message,
-  setMessage,
-  onSaleDeleted,
-  savingCheckout,
-  checkout
-}) => {
+    message,
+    setMessage,
+    onSaleDeleted,
+    onSuccess,
+    requestConfirm,
+    savingCheckout,
+    checkout
+  }) => {
   const LORRY_CAPACITY = 1875;
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -557,6 +649,20 @@ const CashierView = ({
     }
     return map;
   }, [state.returns, returnSaleId]);
+  const returnDraftSummary = useMemo(() => {
+    if (!returnSale) return { qty: 0, amount: 0, goodQty: 0, damagedQty: 0 };
+    return (returnSale.lines || []).reduce((acc, line) => {
+      const draft = returnLinesDraft[line.productId] || {};
+      const qty = Number(draft.quantity || 0);
+      if (!Number.isFinite(qty) || qty <= 0) return acc;
+      const preview = returnLinePreview(returnSale, line, qty);
+      acc.qty += qty;
+      acc.amount += Number(preview.returnAmount || 0);
+      if (String(draft.condition || "good").toLowerCase() === "good") acc.goodQty += qty;
+      else acc.damagedQty += qty;
+      return acc;
+    }, { qty: 0, amount: 0, goodQty: 0, damagedQty: 0 });
+  }, [returnLinesDraft, returnSale]);
 
   const quickAddCustomer = () => {
     setCustomerDraft({ name: "", phone: "", address: "" });
@@ -626,6 +732,7 @@ const CashierView = ({
       await submitReturn({ saleId, lines });
       setReturnLinesDraft({});
       setReturnSaleId("");
+      onSuccess?.("Return Submitted.");
     } catch (error) {
       setReturnError(error.message);
     } finally {
@@ -652,11 +759,13 @@ const CashierView = ({
   }, [state.sales]);
   const [editingSaleId, setEditingSaleId] = useState("");
   const [saleEditLines, setSaleEditLines] = useState([]);
+  const [saleEditPaymentType, setSaleEditPaymentType] = useState(PAYMENT_TYPES[0]);
   const [saleEditError, setSaleEditError] = useState("");
   const [savingSaleEdit, setSavingSaleEdit] = useState(false);
 
   const openSaleEdit = (sale) => {
     setEditingSaleId(sale.id);
+    setSaleEditPaymentType(String(sale.paymentType || PAYMENT_TYPES[0]));
     setSaleEditLines((sale.lines || []).map((line) => ({
       productId: line.productId,
       name: line.name,
@@ -679,17 +788,18 @@ const CashierView = ({
           price: lineFinalPrice(line)
         }))
         .filter((line) => Number.isFinite(line.quantity) && line.quantity > 0);
-      if (!editingSaleId || !lines.length) {
-        setSaleEditError("Keep at least one item in bill.");
-        return;
-      }
-      setSavingSaleEdit(true);
-      setSaleEditError("");
-      await patchSale(editingSaleId, { lines });
-      setEditingSaleId("");
-      setSaleEditLines([]);
-    } catch (error) {
-      setSaleEditError(error.message);
+        if (!editingSaleId || !lines.length) {
+          setSaleEditError("Keep at least one item in bill.");
+          return;
+        }
+        setSavingSaleEdit(true);
+        setSaleEditError("");
+      await patchSale(editingSaleId, { lines, paymentType: saleEditPaymentType });
+        setEditingSaleId("");
+        setSaleEditPaymentType(PAYMENT_TYPES[0]);
+        setSaleEditLines([]);
+      } catch (error) {
+        setSaleEditError(error.message);
     } finally {
       setSavingSaleEdit(false);
     }
@@ -720,15 +830,21 @@ const CashierView = ({
         setNotice("You can delete only your own bills.");
         return;
       }
-      const ok = window.confirm(`Delete sale #${sale.id}? All items on this bill will be restocked.`);
+      const ok = await requestConfirm({
+        title: "Delete Sale",
+        message: `Are you sure want to delete sale #${sale.id}? All items on this bill will be restocked.`,
+        confirmLabel: "Delete",
+        tone: "danger"
+      });
       if (!ok) return;
       await deleteSale(sale.id);
       onSaleDeleted?.(sale.id);
-      if (String(editingSaleId || "") === String(sale.id)) {
-        setEditingSaleId("");
-        setSaleEditLines([]);
-        setSaleEditError("");
-      }
+        if (String(editingSaleId || "") === String(sale.id)) {
+          setEditingSaleId("");
+          setSaleEditPaymentType(PAYMENT_TYPES[0]);
+          setSaleEditLines([]);
+          setSaleEditError("");
+        }
       setNotice(`Sale #${sale.id} deleted.`);
     } catch (error) {
       setNotice(error.message);
@@ -936,24 +1052,7 @@ const CashierView = ({
               <select value={paymentType} onChange={(e) => setPaymentType(e.target.value)}>
                 {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
               </select>
-              {paymentType === "cash" ? (
-                <input type="number" step="0.01" min="0" value={cashReceived} onChange={(e) => setCashReceived(e.target.value)} placeholder="Cash received" />
-              ) : null}
-              {paymentType === "credit" ? (
-                <>
-                  <label className="form-hint">Credit due date</label>
-                  <input type="date" value={creditDueDate} onChange={(e) => setCreditDueDate(e.target.value)} placeholder="Credit due date" />
-                </>
-              ) : null}
-              {paymentType === "cheque" ? (
-                <>
-                  <label className="form-hint">Cheque details</label>
-                  <input type="number" step="0.01" min="0" value={chequeAmount} onChange={(e) => setChequeAmount(e.target.value)} placeholder="Cheque amount" />
-                  <input value={chequeNo} onChange={(e) => setChequeNo(e.target.value)} placeholder="Cheque number" />
-                  <input type="date" value={chequeDate} onChange={(e) => setChequeDate(e.target.value)} placeholder="Cheque date" />
-                  <input value={chequeBank} onChange={(e) => setChequeBank(e.target.value)} placeholder="Bank (optional)" />
-                </>
-              ) : null}
+              <p className="form-hint">Payment will be collected and confirmed at delivery.</p>
               
             </div>
            
@@ -1023,33 +1122,71 @@ const CashierView = ({
             {!returnSaleId ? <p className="form-hint">Select customer then bill, or type Sale ID manually to load bill items.</p> : null}
             {returnSaleId && !returnSale ? <p className="form-hint">Sale not found.</p> : null}
             {returnSale ? (
-              <>
-                <article className="list-row">
-                  <div>
-                    <strong>Sale #{returnSale.id}</strong>
-                    <p>{new Date(returnSale.createdAt).toLocaleString()}</p>
-                    <p>{returnSale.customerName} • {returnSale.lorry || "-"}</p>
+                <>
+                  <article className="list-row">
+                    <div>
+                      <strong>Sale #{returnSale.id}</strong>
+                      <p>{new Date(returnSale.createdAt).toLocaleString()}</p>
+                      <p>{returnSale.customerName} • {returnSale.lorry || "-"}</p>
+                    </div>
+                    <strong>{currency(returnSale.total)}</strong>
+                  </article>
+                  <div className="return-draft-summary">
+                    <article>
+                      <span>Selected Qty</span>
+                      <strong>{returnDraftSummary.qty}</strong>
+                    </article>
+                    <article>
+                      <span>Good Returns</span>
+                      <strong>{returnDraftSummary.goodQty}</strong>
+                    </article>
+                    <article>
+                      <span>Damaged Returns</span>
+                      <strong>{returnDraftSummary.damagedQty}</strong>
+                    </article>
+                    <article className="return-draft-summary-amount">
+                      <span>Return Credit</span>
+                      <strong>{currency(returnDraftSummary.amount)}</strong>
+                    </article>
                   </div>
-                  <strong>{currency(returnSale.total)}</strong>
-                </article>
-                <div className="list">
-                  {(returnSale.lines || []).map((line) => {
-                    const sold = Number(line.quantity || 0);
-                    const returned = Number(returnedQtyByProduct.get(line.productId) || 0);
-                    const draft = returnLinesDraft[line.productId] || { quantity: "", condition: "good" };
-                    const draftQty = Number(draft.quantity || 0);
-                    const remainingBeforeDraft = Math.max(0, sold - returned);
-                    const remainingLive = Math.max(0, sold - returned - (Number.isFinite(draftQty) ? draftQty : 0));
-                    return (
-                      <article key={line.productId} className="list-row">
-                        <div>
-                          <strong>{line.name}</strong>
-                          <p>Sold {sold} • Returned {returned} • Remaining {remainingLive}</p>
-                        </div>
-                        <div className="return-line-controls">
-                          <input type="number" min="0" max={remainingBeforeDraft} value={draft.quantity} onChange={(e) => onReturnDraftChange(line.productId, { quantity: e.target.value })} placeholder="Qty" />
-                          <select value={draft.condition} onChange={(e) => onReturnDraftChange(line.productId, { condition: e.target.value })}>
-                            <option value="good">Good</option>
+                  <div className="list">
+                    {(returnSale.lines || []).map((line) => {
+                      const sold = Number(line.quantity || 0);
+                      const returned = Number(returnedQtyByProduct.get(line.productId) || 0);
+                      const draft = returnLinesDraft[line.productId] || { quantity: "", condition: "good" };
+                      const draftQty = Number(draft.quantity || 0);
+                      const remainingBeforeDraft = Math.max(0, sold - returned);
+                      const remainingLive = Math.max(0, sold - returned - (Number.isFinite(draftQty) ? draftQty : 0));
+                      const preview = returnLinePreview(returnSale, line, Number.isFinite(draftQty) ? draftQty : 0);
+                      const lineHasItemDiscount = Number(lineItemDiscount(line) || 0) > 0;
+                      const lineHasBillDiscount = Number(returnSale.discountAmount || returnSale.discount || 0) > 0;
+                      return (
+                        <article key={line.productId} className="list-row return-line-card">
+                            <div className="return-line-main">
+                              <strong>{line.name}</strong>
+                              <p>Sold {sold} • Returned {returned} • Remaining {remainingLive}</p>
+                              <p>Sold unit value {currency(line.price || 0)}</p>
+                              {draftQty > 0 ? (
+                                <p className="return-line-discount-note">
+                                  Proportional bill discount {currency(preview.billDiscountShare || 0)}
+                                </p>
+                              ) : null}
+                              {lineHasItemDiscount || lineHasBillDiscount ? (
+                                <p className="return-line-discount-note">
+                                  {lineHasItemDiscount ? `Item discount applied${lineHasBillDiscount ? " • " : ""}` : ""}
+                                  {lineHasBillDiscount ? "Bill discount shared proportionally" : ""}
+                                </p>
+                            ) : null}
+                            {draftQty > 0 ? (
+                              <p className="return-line-credit">
+                                Return credit {currency(preview.returnAmount)}
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="return-line-controls">
+                            <input type="number" min="0" max={remainingBeforeDraft} value={draft.quantity} onChange={(e) => onReturnDraftChange(line.productId, { quantity: e.target.value })} placeholder="Qty" />
+                            <select value={draft.condition} onChange={(e) => onReturnDraftChange(line.productId, { condition: e.target.value })}>
+                              <option value="good">Good</option>
                             <option value="damaged">Expired / Damaged</option>
                           </select>
                         </div>
@@ -1096,6 +1233,12 @@ const CashierView = ({
             {editingSaleId ? (
               <div className="admin-inline-form rep-sale-edit-form">
                 <p className="form-hint rep-sale-edit-title">Editing sale #{editingSaleId}</p>
+                <label className="rep-sale-field rep-sale-edit-payment">
+                  <span>Payment Method</span>
+                  <select value={saleEditPaymentType} onChange={(e) => setSaleEditPaymentType(e.target.value)}>
+                    {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                  </select>
+                </label>
               {saleEditLines.map((line) => (
                 <div key={line.productId} className="rep-sale-edit-row">
                   <div className="rep-sale-edit-name">{line.name}</div>
@@ -1145,12 +1288,12 @@ const CashierView = ({
                   </div>
                 </div>
               ))}
-                {saleEditError ? <p className="form-hint">{saleEditError}</p> : null}
-                <div className="rep-sale-edit-actions">
-                  <button type="button" onClick={saveSaleEdit} disabled={savingSaleEdit}>{savingSaleEdit ? "Saving..." : "Save Edit"}</button>
-                  <button type="button" className="ghost" onClick={() => { setEditingSaleId(""); setSaleEditLines([]); setSaleEditError(""); }}>Cancel</button>
+                  {saleEditError ? <p className="form-hint">{saleEditError}</p> : null}
+                  <div className="rep-sale-edit-actions">
+                    <button type="button" onClick={saveSaleEdit} disabled={savingSaleEdit}>{savingSaleEdit ? "Saving..." : "Save Edit"}</button>
+                  <button type="button" className="ghost" onClick={() => { setEditingSaleId(""); setSaleEditPaymentType(PAYMENT_TYPES[0]); setSaleEditLines([]); setSaleEditError(""); }}>Cancel</button>
+                  </div>
                 </div>
-              </div>
             ) : null}
           </section>
           <section className="panel">
@@ -1344,7 +1487,7 @@ const CashierView = ({
   );
 };
 
-const AdminView = ({ state, dashboard, message, onError }) => {
+const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
   const [showLowStock, setShowLowStock] = useState(false);
   const [selectedRep, setSelectedRep] = useState("");
   const [chartDateFrom, setChartDateFrom] = useState("");
@@ -1375,10 +1518,10 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "" });
   const [staffForm, setStaffForm] = useState({ id: "", name: "", role: "", phone: "" });
   const [stockMode, setStockMode] = useState("add");
-  const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "" });
+  const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
   const [stockSearch, setStockSearch] = useState("");
   const [showStockSuggestions, setShowStockSuggestions] = useState(false);
-  const [newStockItemForm, setNewStockItemForm] = useState({ sku: "", category: "General", billingPrice: "", mrp: "" });
+  const [newStockItemForm, setNewStockItemForm] = useState({ sku: "", category: "General", billingPrice: "", invoicePrice: "", mrp: "" });
   const stockFileRef = useRef(null);
   const customerFileRef = useRef(null);
   const [showCustomerForm, setShowCustomerForm] = useState(false);
@@ -1394,6 +1537,11 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const [customerDetailName, setCustomerDetailName] = useState("");
   const [deliverySaleId, setDeliverySaleId] = useState("");
   const [deliveryDraft, setDeliveryDraft] = useState({});
+  const [deliveryCashReceived, setDeliveryCashReceived] = useState("");
+  const [deliveryChequeAmount, setDeliveryChequeAmount] = useState("");
+  const [deliveryChequeNo, setDeliveryChequeNo] = useState("");
+  const [deliveryChequeDate, setDeliveryChequeDate] = useState("");
+  const [deliveryChequeBank, setDeliveryChequeBank] = useState("");
   const [deliveryError, setDeliveryError] = useState("");
   const [savingDelivery, setSavingDelivery] = useState(false);
   const [tableSort, setTableSort] = useState({});
@@ -1601,7 +1749,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       whenTs: new Date(sale.createdAt).getTime(),
       rep: sale.cashier || "-",
       lorry: sale.lorry || "-",
-      total: Number(sale.total || 0),
+      total: saleNetTotal(sale),
       raw: sale
     }));
   }, [reportSales]);
@@ -1692,6 +1840,68 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       topCustomerSpent: Number(topCustomer?.spent || 0)
     };
   }, [sortedCustomerRows]);
+  const overdueCreditSummary = useMemo(() => {
+    const now = Date.now();
+    const byCustomer = new Map();
+    for (const sale of (state.sales || [])) {
+      const outstanding = Number(sale.outstandingAmount || 0);
+      if (outstanding <= 0) continue;
+      const createdAtTs = new Date(sale.createdAt || 0).getTime();
+      if (!Number.isFinite(createdAtTs)) continue;
+      const overdueDays = Math.floor((now - createdAtTs) / 86400000);
+      if (overdueDays <= 14) continue;
+      const key = String(sale.customerName || "Walk-in").trim() || "Walk-in";
+      const row = byCustomer.get(key) || { customer: key, amount: 0, bills: 0, maxDays: 0 };
+      row.amount += outstanding;
+      row.bills += 1;
+      row.maxDays = Math.max(row.maxDays, overdueDays);
+      byCustomer.set(key, row);
+    }
+    const rows = [...byCustomer.values()].sort((a, b) => b.amount - a.amount);
+    return {
+      count: rows.length,
+      total: Number(rows.reduce((acc, row) => acc + Number(row.amount || 0), 0).toFixed(2)),
+      top: rows[0] || null,
+      rows
+    };
+  }, [state.sales]);
+  const dashboardProfitSummary = useMemo(() => {
+    const productsById = new Map((state.products || []).map((product) => [String(product.id), product]));
+    const returnedQtyBySaleProduct = new Map();
+    for (const entry of (state.returns || [])) {
+      const saleId = String(entry.saleId || "");
+      for (const line of (entry.lines || [])) {
+        const key = `${saleId}:${String(line.productId || "")}`;
+        returnedQtyBySaleProduct.set(
+          key,
+          Number(returnedQtyBySaleProduct.get(key) || 0) + Number(line.quantity || 0)
+        );
+      }
+    }
+
+    let netRevenue = 0;
+    let invoiceCost = 0;
+
+    for (const sale of (state.sales || [])) {
+      netRevenue += saleNetTotal(sale);
+      for (const line of (sale.lines || [])) {
+        const key = `${String(sale.id)}:${String(line.productId || "")}`;
+        const returnedQty = Number(returnedQtyBySaleProduct.get(key) || 0);
+        const netQty = Math.max(0, Number(line.quantity || 0) - returnedQty);
+        const product = productsById.get(String(line.productId || ""));
+        const unitInvoice = Number(product?.invoicePrice ?? 0);
+        invoiceCost += netQty * unitInvoice;
+      }
+    }
+
+    const profit = Number((netRevenue - invoiceCost).toFixed(2));
+    return {
+      revenue: Number(netRevenue.toFixed(2)),
+      cost: Number(invoiceCost.toFixed(2)),
+      profit,
+      margin: netRevenue > 0 ? Number(((profit / netRevenue) * 100).toFixed(1)) : 0
+    };
+  }, [state.products, state.returns, state.sales]);
   const customerDetailData = useMemo(() => {
     const key = String(customerDetailName || "").trim().toLowerCase();
     if (!key) return null;
@@ -1703,15 +1913,26 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     const totalBills = sales.length;
     const totalQty = sales.reduce((acc, sale) => acc + (sale.lines || []).reduce((lineAcc, line) => lineAcc + Number(line.quantity || 0), 0), 0);
     const averageBillValue = totalBills ? Number((Number(row.spent || 0) / totalBills).toFixed(2)) : 0;
+    const saleIds = new Set(sales.map((sale) => String(sale.id)));
+    const returnSummary = (state.returns || []).reduce((acc, entry) => {
+      if (!saleIds.has(String(entry.saleId))) return acc;
+      (entry.lines || []).forEach((line) => {
+        acc.qty += Number(line.quantity || 0);
+        acc.value += Number(line.returnAmount || 0);
+      });
+      return acc;
+    }, { qty: 0, value: 0 });
     return {
       row,
       totalBills,
       totalQty,
+      returnedQty: returnSummary.qty,
+      returnedValue: Number(returnSummary.value.toFixed(2)),
       averageBillValue,
       lastSaleAt: sales[0]?.createdAt || "",
       recentSales: sales.slice(0, 4)
     };
-  }, [customerDetailName, customerRows, state.sales]);
+  }, [customerDetailName, customerRows, state.sales, state.returns]);
 
   const stockRows = useMemo(() => {
     return [...state.products].sort((a, b) => a.stock - b.stock);
@@ -1730,6 +1951,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       name: (row) => row.name,
       size: (row) => row.size || "",
       sku: (row) => row.sku,
+      invoicePrice: (row) => Number(row.invoicePrice ?? 0),
       billingPrice: (row) => Number(row.billingPrice ?? row.price ?? 0),
       mrp: (row) => Number(row.mrp ?? row.price ?? 0),
       stock: (row) => Number(row.stock || 0)
@@ -1743,12 +1965,15 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     const lowStockThreshold = Number(state?.settings?.lowStockThreshold ?? 25);
     const lowStockCount = rows.filter((row) => Number(row.stock || 0) <= lowStockThreshold).length;
     const outOfStockCount = rows.filter((row) => Number(row.stock || 0) <= 0).length;
-    const inventoryCost = Number(rows.reduce((acc, row) => (
-      acc + (Number(row.stock || 0) * Number(row.billingPrice ?? row.price ?? 0))
-    ), 0).toFixed(2));
-    const inventoryMrp = Number(rows.reduce((acc, row) => (
-      acc + (Number(row.stock || 0) * Number(row.mrp ?? row.price ?? 0))
-    ), 0).toFixed(2));
+      const inventoryCost = Number(rows.reduce((acc, row) => (
+        acc + (Number(row.stock || 0) * Number(row.billingPrice ?? row.price ?? 0))
+      ), 0).toFixed(2));
+      const inventoryInvoice = Number(rows.reduce((acc, row) => (
+        acc + (Number(row.stock || 0) * Number(row.invoicePrice ?? 0))
+      ), 0).toFixed(2));
+      const inventoryMrp = Number(rows.reduce((acc, row) => (
+        acc + (Number(row.stock || 0) * Number(row.mrp ?? row.price ?? 0))
+      ), 0).toFixed(2));
     const topStockItem = rows.reduce(
       (best, row) => (Number(row.stock || 0) > Number(best?.stock || -1) ? row : best),
       null
@@ -1757,9 +1982,10 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       totalSkus,
       totalUnits,
       lowStockCount,
-      outOfStockCount,
-      inventoryCost,
-      inventoryMrp,
+        outOfStockCount,
+        inventoryInvoice,
+        inventoryCost,
+        inventoryMrp,
       topStockName: topStockItem?.name || topStockItem?.sku || "-",
       topStockUnits: Number(topStockItem?.stock || 0)
     };
@@ -1774,6 +2000,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
           saleId: ret.saleId,
           item: line.name || line.productId,
           qty: Number(line.quantity || 0),
+          amount: Number(line.returnAmount || 0),
           rep: ret.rep || "-",
           reason: line.condition === "good" ? "Good" : "Expired / Damaged",
           at: ret.createdAt
@@ -1911,7 +2138,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     [sortedSalesWiseRows]
   );
   const chequeReportSummary = useMemo(() => {
-    const chequeSales = reportSales.filter((sale) => String(sale.paymentType || "").toLowerCase() === "cheque");
+    const chequeSales = reportSales.filter((sale) => Number(sale.chequeAmount || 0) > 0);
     const chequeCount = chequeSales.length;
     const totalChequeAmount = Number(chequeSales.reduce((acc, sale) => acc + Number(sale.chequeAmount || sale.paidAmount || 0), 0).toFixed(2));
     const totalOutstanding = Number(chequeSales.reduce((acc, sale) => acc + Number(sale.outstandingAmount || 0), 0).toFixed(2));
@@ -2037,10 +2264,13 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const reportDeliveryRows = useMemo(() => {
     const rows = reportDeliverySales.map((sale) => {
       const soldQty = (sale.lines || []).reduce((acc, line) => acc + Number(line.quantity || 0), 0);
+      const isConfirmed = Boolean(sale.deliveryConfirmedAt);
       const undeliveredByProduct = new Map();
-      for (const adj of (sale.deliveryAdjustments || [])) {
-        for (const line of (adj.lines || [])) {
-          undeliveredByProduct.set(line.productId, (undeliveredByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
+      if (isConfirmed) {
+        for (const adj of (sale.deliveryAdjustments || [])) {
+          for (const line of (adj.lines || [])) {
+            undeliveredByProduct.set(line.productId, (undeliveredByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
+          }
         }
       }
       let undeliveredQty = 0;
@@ -2048,8 +2278,8 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       let deliveredValue = 0;
       for (const line of (sale.lines || [])) {
         const sold = Number(line.quantity || 0);
-        const undelivered = Math.max(0, Number(undeliveredByProduct.get(line.productId) || 0));
-        const delivered = Math.max(0, sold - undelivered);
+        const undelivered = isConfirmed ? Math.max(0, Number(undeliveredByProduct.get(line.productId) || 0)) : 0;
+        const delivered = isConfirmed ? Math.max(0, sold - undelivered) : 0;
         undeliveredQty += undelivered;
         deliveredQty += delivered;
         deliveredValue += delivered * Number(line.price || 0);
@@ -2059,7 +2289,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
         date: sale.createdAt ? new Date(sale.createdAt).toLocaleDateString() : "-",
         rep: sale.cashier || "-",
         lorry: sale.lorry || "-",
-        status: sale.deliveryConfirmedAt ? "Confirmed" : "Pending",
+        status: isConfirmed ? "Confirmed" : "Pending",
         soldQty,
         undeliveredQty,
         deliveredQty,
@@ -2094,10 +2324,62 @@ const AdminView = ({ state, dashboard, message, onError }) => {
     () => (state.sales || []).find((sale) => String(sale.id) === String(viewSaleId)) || null,
     [state.sales, viewSaleId]
   );
+  const viewedSaleReturnByProduct = useMemo(() => {
+    const map = new Map();
+    if (!viewedSale) return map;
+    for (const ret of (state.returns || [])) {
+      if (String(ret.saleId) !== String(viewedSale.id)) continue;
+      for (const line of (ret.lines || [])) {
+        const key = String(line.productId || "");
+        if (!key) continue;
+        const current = map.get(key) || { qty: 0, amount: 0 };
+        current.qty += Number(line.quantity || 0);
+        current.amount += Number(line.returnAmount || 0);
+        map.set(key, current);
+      }
+    }
+    return map;
+  }, [state.returns, viewedSale]);
+  const viewedSaleReturnedAmount = useMemo(
+    () => Number((viewedSale?.returnedAmount || 0).toFixed(2)),
+    [viewedSale]
+  );
+  const viewedSaleNetAmount = useMemo(
+    () => saleNetTotal(viewedSale),
+    [viewedSale]
+  );
 
   const deliverySale = useMemo(
     () => (state.sales || []).find((sale) => String(sale.id) === String(deliverySaleId)) || null,
     [state.sales, deliverySaleId]
+  );
+  const deliveryPaymentRows = useMemo(
+    () => salePayments(deliverySale),
+    [deliverySale]
+  );
+  const deliveryPaidSoFar = useMemo(
+    () => Number(deliveryPaymentRows.reduce((acc, payment) => acc + Number(payment.amount || 0), 0).toFixed(2)),
+    [deliveryPaymentRows]
+  );
+  const deliveryDraftCash = useMemo(
+    () => Math.max(0, Number(deliveryCashReceived || 0) || 0),
+    [deliveryCashReceived]
+  );
+  const deliveryDraftCheque = useMemo(
+    () => Math.max(0, Number(deliveryChequeAmount || 0) || 0),
+    [deliveryChequeAmount]
+  );
+  const deliveryDraftSettlement = useMemo(
+    () => Number((deliveryDraftCash + deliveryDraftCheque).toFixed(2)),
+    [deliveryDraftCash, deliveryDraftCheque]
+  );
+  const deliveryRemaining = useMemo(
+    () => Math.max(0, Number((Number(deliverySale?.total || 0) - deliveryPaidSoFar).toFixed(2))),
+    [deliverySale?.total, deliveryPaidSoFar]
+  );
+  const deliveryRemainingAfterDraft = useMemo(
+    () => Math.max(0, Number((deliveryRemaining - deliveryDraftSettlement).toFixed(2))),
+    [deliveryRemaining, deliveryDraftSettlement]
   );
 
   const openAdminSaleEdit = (sale) => {
@@ -2134,7 +2416,12 @@ const AdminView = ({ state, dashboard, message, onError }) => {
 
   const deleteAdminSale = async (sale) => {
     try {
-      const ok = window.confirm(`Delete sale #${sale.id}? This will restore stock and remove linked returns.`);
+      const ok = await requestConfirm({
+        title: "Delete Sale",
+        message: `Are you sure want to delete sale #${sale.id}? This will restore stock and remove linked returns.`,
+        confirmLabel: "Delete",
+        tone: "danger"
+      });
       if (!ok) return;
       setDeletingSaleId(String(sale.id));
       await deleteSale(sale.id);
@@ -2152,17 +2439,25 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   };
 
   const printAdminSaleReceipt = (sale) => {
-    openSaleReceiptPrint({
-      sale,
-      customers: state.customers || [],
-      products: state.products || [],
-      onPopupBlocked: () => setNotice("Allow popups to print receipt.")
-    });
-  };
+      openSaleReceiptPrint({
+        sale,
+        customers: state.customers || [],
+        products: state.products || [],
+        returnByProduct: viewedSale && String(viewedSale.id) === String(sale.id) ? viewedSaleReturnByProduct : new Map(),
+        returnedAmountOverride: viewedSale && String(viewedSale.id) === String(sale.id) ? viewedSaleReturnedAmount : Number(sale?.returnedAmount || 0),
+        totalOverride: viewedSale && String(viewedSale.id) === String(sale.id) ? viewedSaleNetAmount : saleNetTotal(sale),
+        onPopupBlocked: () => setNotice("Allow popups to print receipt.")
+      });
+    };
 
   const openDeliveryModal = (sale) => {
     setDeliverySaleId(String(sale.id));
     setDeliveryDraft({});
+    setDeliveryCashReceived("");
+    setDeliveryChequeAmount("");
+    setDeliveryChequeNo("");
+    setDeliveryChequeDate("");
+    setDeliveryChequeBank("");
     setDeliveryError("");
   };
 
@@ -2182,11 +2477,42 @@ const AdminView = ({ state, dashboard, message, onError }) => {
           quantity: Number(deliveryDraft[line.productId] || 0)
         }))
         .filter((line) => Number.isFinite(line.quantity) && line.quantity > 0);
+      const cash = Number(deliveryCashReceived || 0);
+      const cheque = Number(deliveryChequeAmount || 0);
+      if (!Number.isFinite(cash) || cash < 0) {
+        setDeliveryError("Cash received must be 0 or more.");
+        return;
+      }
+      if (!Number.isFinite(cheque) || cheque < 0) {
+        setDeliveryError("Cheque amount must be 0 or more.");
+        return;
+      }
+      if ((cash + cheque) > Number(deliveryRemaining || 0)) {
+        setDeliveryError("Cash and cheque total cannot exceed remaining balance.");
+        return;
+      }
+      if (cheque > 0 && (!deliveryChequeNo.trim() || !deliveryChequeDate || !deliveryChequeBank.trim())) {
+        setDeliveryError("Enter cheque number, date, and bank.");
+        return;
+      }
       setSavingDelivery(true);
       setDeliveryError("");
-      await submitDeliveryAdjustment(deliverySale.id, { lines, markConfirmed: true });
+      await submitDeliveryAdjustment(deliverySale.id, {
+        lines,
+        markConfirmed: true,
+        cashReceived: cash,
+        chequeAmount: cheque,
+        chequeNo: deliveryChequeNo.trim(),
+        chequeDate: deliveryChequeDate,
+        chequeBank: deliveryChequeBank.trim()
+      });
       setDeliverySaleId("");
       setDeliveryDraft({});
+      setDeliveryCashReceived("");
+      setDeliveryChequeAmount("");
+      setDeliveryChequeNo("");
+      setDeliveryChequeDate("");
+      setDeliveryChequeBank("");
       setNotice(`Delivery confirmed for sale #${deliverySale.id}.`);
     } catch (error) {
       setDeliveryError(error.message);
@@ -2281,23 +2607,26 @@ const AdminView = ({ state, dashboard, message, onError }) => {
 
   const openStockAdd = () => {
     setStockMode("add");
-    setStockForm({ productId: "", quantity: "", stock: "", sku: "" });
+    setStockForm({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
     setStockSearch("");
     setShowStockSuggestions(false);
-    setNewStockItemForm({ sku: "", category: "General", billingPrice: "", mrp: "" });
+    setNewStockItemForm({ sku: "", category: "General", billingPrice: "", invoicePrice: "", mrp: "" });
     setShowStockForm(true);
   };
 
   const openStockEdit = () => {
     setStockMode("edit");
-    setStockForm({
-      productId: state.products[0]?.id || "",
-      quantity: "",
-      stock: state.products[0]?.stock || "",
-      sku: state.products[0]?.sku || ""
-    });
-    setShowStockForm(true);
-  };
+      setStockForm({
+        productId: state.products[0]?.id || "",
+        quantity: "",
+        stock: state.products[0]?.stock || "",
+        sku: state.products[0]?.sku || "",
+        invoicePrice: String(state.products[0]?.invoicePrice ?? ""),
+        billingPrice: String(state.products[0]?.billingPrice ?? state.products[0]?.price ?? ""),
+        mrp: String(state.products[0]?.mrp ?? state.products[0]?.price ?? "")
+      });
+      setShowStockForm(true);
+    };
 
   const openStockEditByRow = (row) => {
     if (!row) return;
@@ -2307,23 +2636,29 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       return;
     }
     setStockMode("edit");
-    setStockForm({
-      productId: matched.id,
-      quantity: "",
-      stock: String(matched.stock ?? ""),
-      sku: matched.sku || ""
-    });
-    setShowStockForm(true);
-  };
+      setStockForm({
+        productId: matched.id,
+        quantity: "",
+        stock: String(matched.stock ?? ""),
+        sku: matched.sku || "",
+        invoicePrice: String(matched.invoicePrice ?? ""),
+        billingPrice: String(matched.billingPrice ?? matched.price ?? ""),
+        mrp: String(matched.mrp ?? matched.price ?? "")
+      });
+      setShowStockForm(true);
+    };
 
   const onStockProductChange = (productId) => {
     const selected = state.products.find((item) => item.id === productId);
-    setStockForm((current) => ({
-      ...current,
-      productId,
-      sku: selected?.sku || "",
-      stock: stockMode === "edit" ? String(selected?.stock ?? "") : current.stock
-    }));
+      setStockForm((current) => ({
+        ...current,
+        productId,
+        sku: selected?.sku || "",
+        invoicePrice: stockMode === "edit" ? String(selected?.invoicePrice ?? "") : current.invoicePrice,
+        billingPrice: stockMode === "edit" ? String(selected?.billingPrice ?? selected?.price ?? "") : current.billingPrice,
+        mrp: stockMode === "edit" ? String(selected?.mrp ?? selected?.price ?? "") : current.mrp,
+        stock: stockMode === "edit" ? String(selected?.stock ?? "") : current.stock
+      }));
   };
 
   const onStockSearchChange = (value) => {
@@ -2339,11 +2674,12 @@ const AdminView = ({ state, dashboard, message, onError }) => {
       productId: product.id,
       sku: product.sku
     }));
-    setNewStockItemForm((current) => ({
-      ...current,
-      billingPrice: String(product.billingPrice ?? ""),
-      mrp: String(product.mrp ?? product.price ?? "")
-    }));
+      setNewStockItemForm((current) => ({
+        ...current,
+        billingPrice: String(product.billingPrice ?? ""),
+        invoicePrice: String(product.invoicePrice ?? ""),
+        mrp: String(product.mrp ?? product.price ?? "")
+      }));
     setShowStockSuggestions(false);
   };
 
@@ -2492,26 +2828,28 @@ const AdminView = ({ state, dashboard, message, onError }) => {
 
   const saveStock = async () => {
     try {
-      const selected = state.products.find((item) => item.id === stockForm.productId);
-      if (stockMode === "add") {
-        const qty = Number(stockForm.quantity || 0);
-        const billingPrice = Number(newStockItemForm.billingPrice);
-        const mrp = Number(newStockItemForm.mrp);
-        if (Number.isNaN(qty) || qty <= 0) {
-          setNotice("Enter a valid quantity.");
-          return;
-        }
-        if (Number.isNaN(billingPrice) || billingPrice < 0 || Number.isNaN(mrp) || mrp <= 0) {
-          setNotice("Billing Price and MRP are required.");
-          return;
-        }
+        const selected = state.products.find((item) => item.id === stockForm.productId);
+        if (stockMode === "add") {
+          const qty = Number(stockForm.quantity || 0);
+          const billingPrice = Number(newStockItemForm.billingPrice);
+          const invoicePrice = Number(newStockItemForm.invoicePrice || 0);
+          const mrp = Number(newStockItemForm.mrp);
+          if (Number.isNaN(qty) || qty <= 0) {
+            setNotice("Enter a valid quantity.");
+            return;
+          }
+          if (Number.isNaN(billingPrice) || billingPrice < 0 || Number.isNaN(invoicePrice) || invoicePrice < 0 || Number.isNaN(mrp) || mrp <= 0) {
+            setNotice("Invoice Price, Billing Price and MRP are required.");
+            return;
+          }
 
-        if (selected) {
-          await patchProduct(selected.id, {
-            stock: Number(selected.stock) + qty,
-            billingPrice,
-            mrp,
-            price: mrp
+          if (selected) {
+            await patchProduct(selected.id, {
+              stock: Number(selected.stock) + qty,
+              invoicePrice,
+              billingPrice,
+              mrp,
+              price: mrp
           });
           setNotice(`Stock added to ${selected.name}.`);
         } else {
@@ -2522,13 +2860,14 @@ const AdminView = ({ state, dashboard, message, onError }) => {
           }
           const generatedSkuBase = name.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) || "ITEM";
           const generatedSku = `${generatedSkuBase}${Math.floor(100 + Math.random() * 900)}`;
-          await createProduct({
-            name,
-            sku: newStockItemForm.sku.trim() || generatedSku,
-            category: newStockItemForm.category.trim() || "General",
-            billingPrice,
-            mrp,
-            price: mrp,
+            await createProduct({
+              name,
+              sku: newStockItemForm.sku.trim() || generatedSku,
+              category: newStockItemForm.category.trim() || "General",
+              invoicePrice,
+              billingPrice,
+              mrp,
+              price: mrp,
             stock: qty
           });
           setNotice(`New item created: ${name}.`);
@@ -2537,11 +2876,15 @@ const AdminView = ({ state, dashboard, message, onError }) => {
         if (!selected) {
           setNotice("Select a valid product.");
           return;
-        }
-        await patchProduct(selected.id, {
-          stock: Number(stockForm.stock || selected.stock),
-          sku: String(stockForm.sku || selected.sku).trim()
-        });
+          }
+          await patchProduct(selected.id, {
+            stock: Number(stockForm.stock || selected.stock),
+            sku: String(stockForm.sku || selected.sku).trim(),
+            invoicePrice: Number(stockForm.invoicePrice || selected.invoicePrice || 0),
+            billingPrice: Number(stockForm.billingPrice || selected.billingPrice || selected.price || 0),
+            mrp: Number(stockForm.mrp || selected.mrp || selected.price || 0),
+            price: Number(stockForm.mrp || selected.mrp || selected.price || 0)
+          });
         setNotice("Stock updated.");
       }
       setShowStockForm(false);
@@ -2553,7 +2896,12 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   const deleteStockProductById = async (product) => {
     try {
       if (!product?.id) return;
-      const ok = window.confirm(`Delete product ${product.name} (${product.sku})? This cannot be undone.`);
+      const ok = await requestConfirm({
+        title: "Delete Product",
+        message: `Are you sure want to delete ${product.name} (${product.sku})? This cannot be undone.`,
+        confirmLabel: "Delete",
+        tone: "danger"
+      });
       if (!ok) return;
       setDeletingProduct(true);
       await deleteProduct(product.id);
@@ -2664,13 +3012,56 @@ const AdminView = ({ state, dashboard, message, onError }) => {
   };
 
   const navItems = [
-    { id: "dashboard", label: "Dashboard" },
-    { id: "customers", label: "Customers" },
-    { id: "stock", label: "Stock" },
-    { id: "staff", label: "Staff" },
-    { id: "deliveries", label: "Deliveries" },
-    { id: "reports", label: "Reports" },
-    { id: "loadings", label: "Loadings" }
+    { id: "dashboard", label: "Dashboard", iconClass: "dashboard", icon: (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 13.5 12 5l8 8v6.2a1.3 1.3 0 0 1-1.3 1.3h-3.9v-5h-5.6v5H5.3A1.3 1.3 0 0 1 4 19.2z" />
+      </svg>
+    ) },
+    { id: "customers", label: "Customers", iconClass: "customers", icon: (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="9" cy="8" r="3.2" />
+        <path d="M3.8 18.2c0-3.1 2.4-5.4 5.2-5.4s5.2 2.3 5.2 5.4" />
+        <circle cx="16.8" cy="9" r="2.4" />
+        <path d="M14.4 17.8c.5-2 1.9-3.7 4.3-4.2 1.1-.2 2.1.2 2.9.8" />
+      </svg>
+    ) },
+    { id: "stock", label: "Stock", iconClass: "stock", icon: (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4.5 7.5 12 4l7.5 3.5L12 11z" />
+        <path d="M4.5 7.5V16.5L12 20v-9z" />
+        <path d="M19.5 7.5V16.5L12 20v-9z" />
+      </svg>
+    ) },
+    { id: "staff", label: "Staff", iconClass: "staff", icon: (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="7.5" r="3.2" />
+        <path d="M5 19c0-3.6 3-6 7-6s7 2.4 7 6" />
+        <path d="M18.8 6.2h2.6M20.1 4.9v2.6" />
+      </svg>
+    ) },
+    { id: "deliveries", label: "Deliveries", iconClass: "deliveries", icon: (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M3.5 7.5h10.2v7.2H3.5z" />
+        <path d="M13.7 10.2h3.2l2.1 2.4v2.1h-5.3z" />
+        <circle cx="8" cy="18" r="1.8" />
+        <circle cx="17.4" cy="18" r="1.8" />
+      </svg>
+    ) },
+    { id: "reports", label: "Reports", iconClass: "reports", icon: (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M6 18.5V10.8M12 18.5V6.5M18 18.5V13.2" />
+        <path d="M4 19.5h16" />
+      </svg>
+    ) },
+    { id: "loadings", label: "Loadings", iconClass: "loadings", icon: (
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4.2 8.2h9.7v6.5H4.2z" />
+        <path d="M13.9 10.4h3.4l2.5 2.7v1.6h-5.9z" />
+        <path d="M7.2 6V4.2M10.8 6V4.2M16.3 6V4.2" />
+        <circle cx="8.1" cy="17.8" r="1.6" />
+        <circle cx="17.4" cy="17.8" r="1.6" />
+      </svg>
+    ) }
   ];
 
   return (
@@ -2711,7 +3102,10 @@ const AdminView = ({ state, dashboard, message, onError }) => {
               className={activePage === item.id ? "active" : ""}
               onClick={() => setActivePage(item.id)}
             >
-              {item.label}
+              <span className="admin-sidebar-nav">
+                <span className={`admin-sidebar-icon ${item.iconClass}`}>{item.icon}</span>
+                <span className="admin-sidebar-label">{item.label}</span>
+              </span>
             </button>
           ))}
           <div className="side-menu-footer">
@@ -2744,45 +3138,6 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                     </svg>
                   </button>
                 </div>
-              </div>
-              <input
-                className="customers-search search-icon-input"
-                value={customerPanelSearch}
-                onChange={(e) => setCustomerPanelSearch(e.target.value)}
-                placeholder="Search Customer"
-              />
-              <div className="admin-table customer-table customers-table">
-                <div className="customers-table-divider">
-                  <span>CUSTOMERS TABLE</span>
-                </div>
-                <header>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("customers", "name")}>Name{sortMark("customers", "name")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("customers", "phone")}>Phone{sortMark("customers", "phone")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "orders")}>Orders{sortMark("customers", "orders")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "spent")}>Total Spent (LKR){sortMark("customers", "spent")}</button>
-                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "outstanding")}>Outstanding (LKR){sortMark("customers", "outstanding")}</button>
-                  </header>
-                {sortedCustomerRows.length ? sortedCustomerRows.map((row) => (
-                  <article
-                    key={row.name}
-                    className="customers-clickable-row"
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setCustomerDetailName(row.name)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        setCustomerDetailName(row.name);
-                      }
-                    }}
-                  >
-                    <span>{row.name}</span>
-                    <span>{row.phone || "-"}</span>
-                    <span>{row.orders}</span>
-                    <span>{formatLkrValue(row.spent || 0)}</span>
-                    <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{formatLkrValue(row.outstanding || 0)}</span>
-                  </article>
-                )) : <p>No customer records yet.</p>}
               </div>
               <section className="customers-summary-card">
                 <div className="customers-summary-divider">
@@ -2830,6 +3185,45 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </article>
                 </div>
               </section>
+              <input
+                className="customers-search search-icon-input"
+                value={customerPanelSearch}
+                onChange={(e) => setCustomerPanelSearch(e.target.value)}
+                placeholder="Search Customer"
+              />
+              <div className="admin-table customer-table customers-table">
+                <div className="customers-table-divider">
+                  <span>CUSTOMERS TABLE</span>
+                </div>
+                <header>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("customers", "name")}>Name{sortMark("customers", "name")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("customers", "phone")}>Phone{sortMark("customers", "phone")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "orders")}>Orders{sortMark("customers", "orders")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "spent")}>Total Spent (LKR){sortMark("customers", "spent")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "outstanding")}>Outstanding (LKR){sortMark("customers", "outstanding")}</button>
+                  </header>
+                {sortedCustomerRows.length ? sortedCustomerRows.map((row) => (
+                  <article
+                    key={row.name}
+                    className="customers-clickable-row"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setCustomerDetailName(row.name)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setCustomerDetailName(row.name);
+                      }
+                    }}
+                  >
+                    <span>{row.name}</span>
+                    <span>{row.phone || "-"}</span>
+                    <span>{row.orders}</span>
+                    <span>{formatLkrValue(row.spent || 0)}</span>
+                    <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{formatLkrValue(row.outstanding || 0)}</span>
+                  </article>
+                )) : <p>No customer records yet.</p>}
+              </div>
             </section>
           ) : null}
 
@@ -2837,61 +3231,118 @@ const AdminView = ({ state, dashboard, message, onError }) => {
             <section className="admin-mobile-section admin-stock-panel">
               <h2>Stock</h2>
               {showStockForm ? (
-                <div className="admin-inline-form stock-form-panel">
-                  {stockMode === "add" ? (
-                    <>
-                      <input
-                        value={stockSearch}
-                        onChange={(e) => onStockSearchChange(e.target.value)}
-                        onFocus={() => setShowStockSuggestions(true)}
-                        placeholder="Type item name"
-                      />
-                      {showStockSuggestions && stockSearchMatches.length ? (
-                        <div className="stock-suggestions">
-                          {stockSearchMatches.map((product) => (
-                            <button key={product.id} type="button" onClick={() => onSelectExistingStockItem(product)}>
-                              {product.name} ({product.sku})
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                      {stockForm.productId ? (
-                        <p className="form-hint">Existing item selected. Quantity will be added to current stock.</p>
+                <div className="low-stock-modal" onClick={() => setShowStockForm(false)}>
+                  <div className="low-stock-modal-card stock-entry-modal" onClick={(e) => e.stopPropagation()}>
+                    <div className="low-stock-modal-head">
+                      <h3>{stockMode === "add" ? "Stock Entry" : "Edit Stock"}</h3>
+                      <button type="button" className="ghost" onClick={() => setShowStockForm(false)}>Close</button>
+                    </div>
+                    <div className="admin-inline-form stock-form-panel">
+                      {stockMode === "add" ? (
+                        <>
+                          <label className="stock-form-field">
+                            <span>Item Name</span>
+                            <input
+                              value={stockSearch}
+                              onChange={(e) => onStockSearchChange(e.target.value)}
+                              onFocus={() => setShowStockSuggestions(true)}
+                              placeholder="Type item name"
+                            />
+                          </label>
+                          {showStockSuggestions && stockSearchMatches.length ? (
+                            <div className="stock-suggestions">
+                              {stockSearchMatches.map((product) => (
+                                <button key={product.id} type="button" onClick={() => onSelectExistingStockItem(product)}>
+                                  {product.name} ({product.sku})
+                                </button>
+                              ))}
+                            </div>
+                          ) : null}
+                          {stockForm.productId ? (
+                            <p className="form-hint">Existing item selected. Quantity will be added to current stock.</p>
+                          ) : (
+                            <>
+                              <p className="form-hint">No match selected. A new item will be created.</p>
+                              <label className="stock-form-field">
+                                <span>SKU</span>
+                                <input value={newStockItemForm.sku} onChange={(e) => setNewStockItemForm((c) => ({ ...c, sku: e.target.value }))} placeholder="SKU (optional)" />
+                              </label>
+                              <label className="stock-form-field">
+                                <span>Category</span>
+                                <input value={newStockItemForm.category} onChange={(e) => setNewStockItemForm((c) => ({ ...c, category: e.target.value }))} placeholder="Category (optional)" />
+                              </label>
+                            </>
+                          )}
+                          <label className="stock-form-field">
+                            <span>Billing Price (LKR)</span>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={newStockItemForm.billingPrice}
+                              onChange={(e) => setNewStockItemForm((c) => ({ ...c, billingPrice: e.target.value }))}
+                              placeholder="Billing Price (required)"
+                            />
+                          </label>
+                          <label className="stock-form-field">
+                            <span>Invoice Price (LKR)</span>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={newStockItemForm.invoicePrice}
+                              onChange={(e) => setNewStockItemForm((c) => ({ ...c, invoicePrice: e.target.value }))}
+                              placeholder="Invoice Price (required)"
+                            />
+                          </label>
+                          <label className="stock-form-field">
+                            <span>MRP (LKR)</span>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={newStockItemForm.mrp}
+                              onChange={(e) => setNewStockItemForm((c) => ({ ...c, mrp: e.target.value }))}
+                              placeholder="MRP (required)"
+                            />
+                          </label>
+                          <label className="stock-form-field">
+                            <span>Quantity</span>
+                            <input type="number" value={stockForm.quantity} onChange={(e) => setStockForm((c) => ({ ...c, quantity: e.target.value }))} placeholder="Quantity" />
+                          </label>
+                        </>
                       ) : (
                         <>
-                          <p className="form-hint">No match selected. A new item will be created.</p>
-                          <input value={newStockItemForm.sku} onChange={(e) => setNewStockItemForm((c) => ({ ...c, sku: e.target.value }))} placeholder="SKU (optional)" />
-                          <input value={newStockItemForm.category} onChange={(e) => setNewStockItemForm((c) => ({ ...c, category: e.target.value }))} placeholder="Category (optional)" />
+                          <label className="stock-form-field">
+                            <span>Product</span>
+                            <select value={stockForm.productId} onChange={(e) => onStockProductChange(e.target.value)}>
+                              {state.products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
+                            </select>
+                          </label>
+                          <label className="stock-form-field">
+                            <span>SKU</span>
+                            <input value={stockForm.sku || ""} onChange={(e) => setStockForm((c) => ({ ...c, sku: e.target.value }))} placeholder="Edit SKU" />
+                          </label>
+                          <label className="stock-form-field">
+                            <span>Invoice Price (LKR)</span>
+                            <input type="number" step="0.01" value={stockForm.invoicePrice || ""} onChange={(e) => setStockForm((c) => ({ ...c, invoicePrice: e.target.value }))} placeholder="Invoice Price" />
+                          </label>
+                          <label className="stock-form-field">
+                            <span>Billing Price (LKR)</span>
+                            <input type="number" step="0.01" value={stockForm.billingPrice || ""} onChange={(e) => setStockForm((c) => ({ ...c, billingPrice: e.target.value }))} placeholder="Billing Price" />
+                          </label>
+                          <label className="stock-form-field">
+                            <span>MRP (LKR)</span>
+                            <input type="number" step="0.01" value={stockForm.mrp || ""} onChange={(e) => setStockForm((c) => ({ ...c, mrp: e.target.value }))} placeholder="MRP" />
+                          </label>
+                          <label className="stock-form-field">
+                            <span>Stock</span>
+                            <input type="number" value={stockForm.stock} onChange={(e) => setStockForm((c) => ({ ...c, stock: e.target.value }))} placeholder="Set stock" />
+                          </label>
                         </>
                       )}
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={newStockItemForm.billingPrice}
-                        onChange={(e) => setNewStockItemForm((c) => ({ ...c, billingPrice: e.target.value }))}
-                        placeholder="Billing Price (required)"
-                      />
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={newStockItemForm.mrp}
-                        onChange={(e) => setNewStockItemForm((c) => ({ ...c, mrp: e.target.value }))}
-                        placeholder="MRP (required)"
-                      />
-                      <input type="number" value={stockForm.quantity} onChange={(e) => setStockForm((c) => ({ ...c, quantity: e.target.value }))} placeholder="Quantity" />
-                    </>
-                  ) : (
-                    <>
-                      <select value={stockForm.productId} onChange={(e) => onStockProductChange(e.target.value)}>
-                        {state.products.map((product) => <option key={product.id} value={product.id}>{product.name}</option>)}
-                      </select>
-                      <input value={stockForm.sku || ""} onChange={(e) => setStockForm((c) => ({ ...c, sku: e.target.value }))} placeholder="Edit SKU" />
-                      <input type="number" value={stockForm.stock} onChange={(e) => setStockForm((c) => ({ ...c, stock: e.target.value }))} placeholder="Set stock" />
-                    </>
-                  )}
-                  <div>
-                    <button type="button" onClick={saveStock}>Save</button>
-                    <button type="button" className="ghost" onClick={() => setShowStockForm(false)}>Cancel</button>
+                      <div>
+                        <button type="button" onClick={saveStock}>Save</button>
+                        <button type="button" className="ghost" onClick={() => setShowStockForm(false)}>Cancel</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               ) : null}
@@ -2944,10 +3395,14 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   </article>
                 </div>
                 <div className="stock-summary-foot">
-                  <article>
-                    <span>Inventory Cost (LKR)</span>
-                    <strong>{formatLkrValue(stockPageSummary.inventoryCost)}</strong>
-                  </article>
+                    <article>
+                      <span>Invoice Value (LKR)</span>
+                      <strong>{formatLkrValue(stockPageSummary.inventoryInvoice)}</strong>
+                    </article>
+                    <article>
+                      <span>Inventory Cost (LKR)</span>
+                      <strong>{formatLkrValue(stockPageSummary.inventoryCost)}</strong>
+                    </article>
                   <article>
                     <span>Inventory MRP (LKR)</span>
                     <strong>{formatLkrValue(stockPageSummary.inventoryMrp)}</strong>
@@ -2960,13 +3415,14 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 </div>
               </section>
               <div className="admin-table stock-table stock-table-tech">
-                <header>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "sku")}>SKU{sortMark("stock", "sku")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "billingPrice")}>Billing Price (LKR){sortMark("stock", "billingPrice")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "mrp")}>MRP (LKR){sortMark("stock", "mrp")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("stock", "stock")}>Stock{sortMark("stock", "stock")}</button>
-                  <span className="th-action">Action</span>
-                </header>
+                  <header>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stock", "sku")}>SKU{sortMark("stock", "sku")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stock", "invoicePrice")}>Invoice Price (LKR){sortMark("stock", "invoicePrice")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stock", "billingPrice")}>Billing Price (LKR){sortMark("stock", "billingPrice")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stock", "mrp")}>MRP (LKR){sortMark("stock", "mrp")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stock", "stock")}>Stock{sortMark("stock", "stock")}</button>
+                    <span className="th-action">Action</span>
+                  </header>
                 {sortedStockRows.map((item) => (
                   <article
                     key={item.id}
@@ -2980,11 +3436,12 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                         openStockEditByRow(item);
                       }
                     }}
-                  >
-                    <span>{item.sku}</span>
-                    <span>{formatLkrValue(item.billingPrice ?? item.price ?? 0)}</span>
-                    <span>{formatLkrValue(item.mrp ?? item.price ?? 0)}</span>
-                    <span className={item.stock <= 25 ? "low" : ""}>{item.stock}</span>
+                    >
+                      <span>{item.sku}</span>
+                      <span>{formatLkrValue(item.invoicePrice ?? 0)}</span>
+                      <span>{formatLkrValue(item.billingPrice ?? item.price ?? 0)}</span>
+                      <span>{formatLkrValue(item.mrp ?? item.price ?? 0)}</span>
+                      <span className={item.stock <= 25 ? "low" : ""}>{item.stock}</span>
                     <span className="action-cell">
                       <button
                         type="button"
@@ -3008,6 +3465,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                     <span>Sale ID</span>
                     <span>Item</span>
                     <span>Qty</span>
+                      <span>Return Value (LKR)</span>
                     <span>Rep</span>
                     <span>Reason</span>
                   </header>
@@ -3016,6 +3474,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                       <span>#{row.saleId}</span>
                       <span>{row.item}</span>
                       <span>{row.qty}</span>
+                      <span>{formatLkrValue(row.amount)}</span>
                       <span>{row.rep}</span>
                       <span>{row.reason}</span>
                     </article>
@@ -3141,6 +3600,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   <article key={`d-${row.id}`}>
                     <span className="delivery-col-id delivery-sale-cell">
                       <strong className="delivery-sale-id">#{row.id}</strong>
+                      <small className="delivery-sale-customer">{row.sale.customerName || "Walk-in"}</small>
                       <small className="delivery-sale-meta">{row.when} • {row.rep}</small>
                     </span>
                     <span className="delivery-col-date delivery-cell-date">{row.when}</span>
@@ -3212,21 +3672,43 @@ const AdminView = ({ state, dashboard, message, onError }) => {
 
           {activePage === "dashboard" ? (
             <div className="admin-mobile admin-dashboard">
-              <section className="admin-mobile-section dashboard-snapshot-panel">
-                <h2>Admin Snapshot</h2>
-                <div className="snapshot-layout">
-                  <div className="snapshot-grid">
-                    <article><p>Total sales</p><strong>{dashboard.salesCount}</strong></article>
-                    <article><p>Today sales</p><strong>{dashboard.todaySalesCount}</strong></article>
-                    <article><p>Today revenue</p><strong>{dashboard.todayRevenue.toFixed(0)}</strong></article>
-                    <article><p>Low Stock</p><strong>{dashboard.lowStockItems.length}</strong></article>
+                <section className="admin-mobile-section dashboard-snapshot-panel">
+                  <h2>Admin Snapshot</h2>
+                  <div className="snapshot-layout">
+                    <div className="snapshot-grid">
+                      <article><p>Total sales</p><strong>{dashboard.salesCount}</strong></article>
+                      <article><p>Today sales</p><strong>{dashboard.todaySalesCount}</strong></article>
+                      <article><p>Today revenue</p><strong>{dashboard.todayRevenue.toFixed(0)}</strong></article>
+                      <article><p>Low Stock</p><strong>{dashboard.lowStockItems.length}</strong></article>
+                    </div>
+                    <div className="snapshot-sidecards">
+                      <div className="dashboard-profit-card">
+                        <span className="dashboard-profit-eyebrow">Total Net Profit</span>
+                        <strong>LKR {formatLkrValue(dashboardProfitSummary.profit)}</strong>
+                        <div className="dashboard-profit-meta">
+                          <span>Revenue <b>LKR {formatLkrValue(dashboardProfitSummary.revenue)}</b></span>
+                          <span>Invoice Cost <b>LKR {formatLkrValue(dashboardProfitSummary.cost)}</b></span>
+                        </div>
+                        <p>Net margin {dashboardProfitSummary.margin}%</p>
+                      </div>
+                      <button type="button" className="low-stock-card" onClick={() => setShowLowStock(true)}>
+                        <strong>Low Stock</strong>
+                        <span>Click to popup the list</span>
+                      </button>
+                      {overdueCreditSummary.count ? (
+                        <div className="dashboard-alert-card">
+                          <strong>Overdue Credit Alert</strong>
+                          <span>{overdueCreditSummary.count} customer(s) • LKR {formatLkrValue(overdueCreditSummary.total)}</span>
+                          <p>
+                            Top overdue: {overdueCreditSummary.top?.customer || "-"}
+                            {" • "}
+                            {overdueCreditSummary.top?.maxDays || 0} days
+                          </p>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
-                  <button type="button" className="low-stock-card" onClick={() => setShowLowStock(true)}>
-                    <strong>Low Stock</strong>
-                    <span>Click to popup the list</span>
-                  </button>
-                </div>
-              </section>
+                </section>
 
               <section className="admin-mobile-section sales-day-panel dashboard-chart-panel">
                 <h2>Sales Chart by Day</h2>
@@ -3695,6 +4177,14 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                 <strong>{customerDetailData.totalQty}</strong>
               </article>
               <article>
+                <span>Returned Qty</span>
+                <strong>{customerDetailData.returnedQty}</strong>
+              </article>
+              <article>
+                <span>Returned Value (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.returnedValue || 0)}</strong>
+              </article>
+              <article>
                 <span>Average Bill Value</span>
                 <strong>LKR {formatLkrValue(customerDetailData.averageBillValue || 0)}</strong>
               </article>
@@ -3780,36 +4270,131 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                   <span>Item Discount</span>
                   <span>Total<br />LKR</span>
                 </header>
-                {(viewedSale.lines || []).map((line) => (
-                  <article key={`${viewedSale.id}-${line.productId}`}>
-                    <span>{line.sku || productInfoById.get(line.productId)?.sku || "-"}</span>
-                    <span>{line.quantity}</span>
-                    <span>{formatLkrValue(line.price || 0)}</span>
-                    <span>{Number(line.itemDiscount || 0) > 0 ? currency(line.itemDiscount) : "-"}</span>
-                    <span>{formatLkrValue((Number(line.price || 0) * Number(line.quantity || 0)) || 0)}</span>
-                  </article>
-                ))}
-              </div>
-              <div className="receipt-summary-row">
-                <div className="receipt-summary-texts">
-                  <p className="form-hint">Discount: {currency(viewedSale.discount || 0)}</p>
-                  <p className="form-hint"><strong>Total: {currency(viewedSale.total || 0)}</strong></p>
+                  {(viewedSale.lines || []).map((line) => {
+                    const returned = viewedSaleReturnByProduct.get(String(line.productId || "")) || { qty: 0, amount: 0 };
+                    const originalQty = Number(line.quantity || 0);
+                    const netQty = Math.max(0, originalQty - Number(returned.qty || 0));
+                    const grossRemaining = Number((Number(line.price || 0) * netQty).toFixed(2));
+                    const remainingBillDiscountShare = Number(viewedSale.subTotal || 0) > 0
+                      ? Number((Number(viewedSale.discountAmount || viewedSale.discount || 0) * (grossRemaining / Number(viewedSale.subTotal || 1))).toFixed(2))
+                      : 0;
+                    const netLineAmount = Math.max(0, Number((grossRemaining - remainingBillDiscountShare).toFixed(2)));
+                    return (
+                      <article key={`${viewedSale.id}-${line.productId}`}>
+                        <span>
+                          {line.sku || productInfoById.get(line.productId)?.sku || "-"}
+                          {Number(returned.qty || 0) > 0 ? <small className="sales-return-note">Returned {returned.qty}</small> : null}
+                        </span>
+                        <span>{netQty}</span>
+                        <span>{formatLkrValue(line.price || 0)}</span>
+                        <span>
+                          {Number(line.itemDiscount || 0) > 0 ? currency(line.itemDiscount) : "-"}
+                          {remainingBillDiscountShare > 0 ? <small className="sales-return-note">Bill disc. {formatLkrValue(remainingBillDiscountShare)}</small> : null}
+                        </span>
+                        <span>
+                          {formatLkrValue(netLineAmount || 0)}
+                          {Number(returned.amount || 0) > 0 ? <small className="sales-return-note">- {formatLkrValue(returned.amount)}</small> : null}
+                        </span>
+                      </article>
+                    );
+                  })}
                 </div>
-                <button type="button" className="receipt-print-action" onClick={() => printAdminSaleReceipt(viewedSale)}>Print</button>
-              </div>
+                <div className="receipt-summary-row">
+                  <div className="receipt-summary-texts">
+                    <p className="form-hint">Discount: {currency(viewedSale.discount || 0)}</p>
+                    {viewedSaleReturnedAmount > 0 ? <p className="form-hint return-adjust-text">Returns: - {currency(viewedSaleReturnedAmount)}</p> : null}
+                    <p className="form-hint"><strong>Total: {currency(viewedSaleNetAmount || 0)}</strong></p>
+                  </div>
+                  <button type="button" className="receipt-print-action" onClick={() => printAdminSaleReceipt(viewedSale)}>Print</button>
+                </div>
             </div>
           </div>
         </div>
       ) : null}
 
       {deliverySale ? (
-        <div className="low-stock-modal" onClick={() => { setDeliverySaleId(""); setDeliveryDraft({}); setDeliveryError(""); }}>
+        <div className="low-stock-modal" onClick={() => { setDeliverySaleId(""); setDeliveryDraft({}); setDeliveryCashReceived(""); setDeliveryChequeAmount(""); setDeliveryChequeNo(""); setDeliveryChequeDate(""); setDeliveryChequeBank(""); setDeliveryError(""); }}>
           <div className="low-stock-modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="low-stock-modal-head">
               <h3>Confirm Delivery #{deliverySale.id}</h3>
-              <button type="button" onClick={() => { setDeliverySaleId(""); setDeliveryDraft({}); setDeliveryError(""); }}>Close</button>
+              <button type="button" onClick={() => { setDeliverySaleId(""); setDeliveryDraft({}); setDeliveryCashReceived(""); setDeliveryChequeAmount(""); setDeliveryChequeNo(""); setDeliveryChequeDate(""); setDeliveryChequeBank(""); setDeliveryError(""); }}>Close</button>
             </div>
-            <p className="form-hint">{new Date(deliverySale.createdAt).toLocaleString()} • {deliverySale.cashier || "-"} • {deliverySale.lorry || "-"}</p>
+            <p className="form-hint">{new Date(deliverySale.createdAt).toLocaleString()} • {deliverySale.customerName || "Walk-in"} • {deliverySale.cashier || "-"} • {deliverySale.lorry || "-"}</p>
+              <div className="delivery-settlement-panel">
+                  <div className="delivery-settlement-head">
+                    <div>
+                      <h4>Settlement At Delivery</h4>
+                    <p>Collect the delivery payment clearly before confirming this bill.</p>
+                    </div>
+                    <span className={`rep-sale-payment rep-sale-payment-${String(deliverySale.paymentType || "").toLowerCase()}`}>{deliverySale.paymentType}</span>
+                  </div>
+                <div className="delivery-settlement-kpis">
+                  <article>
+                    <span>Order Total</span>
+                    <strong>{currency(deliverySale.total || 0)}</strong>
+                  </article>
+                  <article>
+                    <span>Paid So Far</span>
+                    <strong>{currency(deliveryPaidSoFar)}</strong>
+                  </article>
+                  <article className="active">
+                    <span>This Update</span>
+                    <strong>{currency(deliveryDraftSettlement)}</strong>
+                  </article>
+                  <article className="warn">
+                    <span>Balance After</span>
+                    <strong>{currency(deliveryRemainingAfterDraft)}</strong>
+                  </article>
+                </div>
+                <div className="delivery-settlement-grid">
+                <label className="rep-sale-field">
+                  <span>Cash Received</span>
+                  <input type="number" min="0" step="0.01" value={deliveryCashReceived} onChange={(e) => setDeliveryCashReceived(e.target.value)} placeholder="0.00" />
+                </label>
+                <label className="rep-sale-field">
+                  <span>Cheque Amount</span>
+                  <input type="number" min="0" step="0.01" value={deliveryChequeAmount} onChange={(e) => setDeliveryChequeAmount(e.target.value)} placeholder="0.00" />
+                </label>
+                <label className="rep-sale-field">
+                  <span>Cheque No</span>
+                  <input value={deliveryChequeNo} onChange={(e) => setDeliveryChequeNo(e.target.value)} placeholder="Cheque number" />
+                </label>
+                <label className="rep-sale-field">
+                  <span>Cheque Date</span>
+                  <input type="date" value={deliveryChequeDate} onChange={(e) => setDeliveryChequeDate(e.target.value)} />
+                </label>
+                <label className="rep-sale-field delivery-settlement-bank">
+                  <span>Bank</span>
+                  <input value={deliveryChequeBank} onChange={(e) => setDeliveryChequeBank(e.target.value)} placeholder="Bank name" />
+                </label>
+              </div>
+              </div>
+            <div className="delivery-history delivery-payment-history">
+              <h4>Payment History</h4>
+              {deliveryPaymentRows.length ? (
+                <div className="delivery-history-list">
+                  {deliveryPaymentRows.map((payment) => (
+                    <article key={payment.id} className="delivery-history-row">
+                      <p>
+                        <strong>{String(payment.method || "").toUpperCase()}</strong>
+                        {" • "}
+                        {currency(payment.amount || 0)}
+                        {" • "}
+                        {new Date(payment.createdAt).toLocaleString()}
+                      </p>
+                      <p>
+                        {payment.method === "cheque"
+                          ? `Cheque No: ${payment.chequeNo || "-"} | Date: ${payment.chequeDate || "-"} | Bank: ${payment.chequeBank || "-"}`
+                          : `Received by: ${payment.receivedBy || "-"}`
+                        }
+                      </p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="form-hint">No payment collected yet.</p>
+              )}
+            </div>
             <div className="admin-table deliveries-lines-table">
               <header>
                 <span>Item</span>
@@ -3841,6 +4426,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
                         value={deliveryDraft[line.productId] ?? ""}
                         onChange={(e) => onDeliveryDraftChange(line.productId, e.target.value)}
                         placeholder={`max ${maxQty}`}
+                        disabled={Boolean(deliverySale.deliveryConfirmedAt)}
                       />
                     </span>
                   </article>
@@ -3871,7 +4457,7 @@ const AdminView = ({ state, dashboard, message, onError }) => {
             {deliveryError ? <p className="form-hint">{deliveryError}</p> : null}
             <div className="admin-page-actions">
               <button type="button" onClick={saveDeliveryAdjust} disabled={savingDelivery}>
-                {savingDelivery ? "Saving..." : "Confirm Delivery"}
+                {savingDelivery ? "Saving..." : (deliverySale.deliveryConfirmedAt ? "Save Payment Update" : "Confirm Delivery")}
               </button>
             </div>
           </div>
@@ -3923,13 +4509,35 @@ export const App = () => {
   const [message, setMessage] = useState("");
   const [savingCheckout, setSavingCheckout] = useState(false);
   const [errorModal, setErrorModal] = useState("");
+  const [successModal, setSuccessModal] = useState("");
+  const [confirmModal, setConfirmModal] = useState(null);
   const [authError, setAuthError] = useState("");
   const [session, setSession] = useState(null);
+  const confirmResolverRef = useRef(null);
 
   const showErrorModal = (text) => {
     const value = String(text || "").trim();
     setMessage("");
     setErrorModal(value || "Something went wrong.");
+  };
+
+  const showSuccessModal = (text) => {
+    const value = String(text || "").trim();
+    setMessage("");
+    setSuccessModal(value || "Done.");
+  };
+
+  const requestConfirm = ({ title = "Confirm Delete", message = "Are you sure want to delete?", confirmLabel = "Delete", cancelLabel = "Cancel", tone = "danger" } = {}) =>
+    new Promise((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmModal({ title, message, confirmLabel, cancelLabel, tone });
+    });
+
+  const resolveConfirm = (accepted) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmModal(null);
+    if (typeof resolver === "function") resolver(Boolean(accepted));
   };
 
   const taxRate = 0;
@@ -4154,32 +4762,6 @@ export const App = () => {
         showErrorModal(`Selected lorry exceeds capacity. Only ${Math.max(0, LORRY_CAPACITY - pendingLoad)} items left.`);
         return;
       }
-      if (paymentType === "cash") {
-        const paid = Number(cashReceived || 0);
-        if (!Number.isFinite(paid) || paid < 0) {
-          showErrorModal("Cash received must be 0 or more.");
-          return;
-        }
-      }
-      if (paymentType === "credit" && !creditDueDate) {
-        showErrorModal("Select credit due date.");
-        return;
-      }
-      if (paymentType === "cheque") {
-        const chequePaid = Number(chequeAmount || 0);
-        if (!Number.isFinite(chequePaid) || chequePaid < 0) {
-          showErrorModal("Cheque amount must be 0 or more.");
-          return;
-        }
-        if (!chequeNo.trim()) {
-          showErrorModal("Enter cheque number.");
-          return;
-        }
-        if (!chequeDate) {
-          showErrorModal("Select cheque date.");
-          return;
-        }
-      }
       const sale = await submitSale({
         requestId: createSaleRequestId(),
         cashier,
@@ -4187,12 +4769,6 @@ export const App = () => {
         customerPhone: matchedCustomer?.phone ? String(matchedCustomer.phone).trim() : undefined,
         lorry,
         paymentType,
-        cashReceived: paymentType === "cash" ? Number(cashReceived || 0) : undefined,
-        creditDueDate: paymentType === "credit" ? creditDueDate : undefined,
-        chequeAmount: paymentType === "cheque" ? Number(chequeAmount || 0) : undefined,
-        chequeNo: paymentType === "cheque" ? chequeNo.trim() : undefined,
-        chequeDate: paymentType === "cheque" ? chequeDate : undefined,
-        chequeBank: paymentType === "cheque" ? chequeBank.trim() : undefined,
         discount: discountAmount,
         taxRate: 0,
         lines: effectiveCartLines
@@ -4207,7 +4783,7 @@ export const App = () => {
         fallbackCustomerName: customerName,
         onPopupBlocked: () => showErrorModal(`Sale ${sale.id} completed, but popup is blocked. Allow popups to print receipt.`)
       });
-      setMessage(`Sale ${sale.id} completed. Total ${currency(sale.total)}.`);
+      showSuccessModal("Order completed.");
       setCart([]);
       setDiscountValue("");
       setCashReceived("");
@@ -4265,31 +4841,60 @@ export const App = () => {
         cart={cart}
         setCart={setCart}
         totals={totals}
-        message={message}
-        setMessage={setMessage}
-        onSaleDeleted={applyLocalSaleDelete}
-        savingCheckout={savingCheckout}
-        checkout={checkout}
-      />
+            message={message}
+            setMessage={setMessage}
+            onSaleDeleted={applyLocalSaleDelete}
+            onSuccess={showSuccessModal}
+            requestConfirm={requestConfirm}
+            savingCheckout={savingCheckout}
+            checkout={checkout}
+          />
       ) : (
         <AdminView
-          state={state}
-          dashboard={dashboard}
-          message={message}
-          onError={showErrorModal}
-        />
-      )}
-      {errorModal ? (
-        <div className="low-stock-modal" onClick={() => setErrorModal("")}>
-          <div className="low-stock-modal-card error-modal-card" onClick={(e) => e.stopPropagation()}>
+            state={state}
+            dashboard={dashboard}
+            message={message}
+            onError={showErrorModal}
+            requestConfirm={requestConfirm}
+          />
+        )}
+        {errorModal ? (
+          <div className="low-stock-modal" onClick={() => setErrorModal("")}>
+            <div className="low-stock-modal-card error-modal-card" onClick={(e) => e.stopPropagation()}>
             <div className="low-stock-modal-head">
               <h3>Error</h3>
               <button type="button" onClick={() => setErrorModal("")}>Close</button>
             </div>
             <p className="error-modal-text">{errorModal}</p>
+            </div>
           </div>
-        </div>
-      ) : null}
-    </div>
-  );
-};
+        ) : null}
+        {successModal ? (
+          <div className="low-stock-modal" onClick={() => setSuccessModal("")}>
+            <div className="low-stock-modal-card success-modal-card" onClick={(e) => e.stopPropagation()}>
+              <div className="low-stock-modal-head">
+                <h3><span className="success-modal-icon" aria-hidden="true">✔</span>Success</h3>
+                <button type="button" onClick={() => setSuccessModal("")}>Close</button>
+              </div>
+              <p className="success-modal-text">{successModal}</p>
+            </div>
+          </div>
+        ) : null}
+        {confirmModal ? (
+          <div className="low-stock-modal" onClick={() => resolveConfirm(false)}>
+            <div className={`low-stock-modal-card confirm-modal-card confirm-modal-card-${confirmModal.tone || "danger"}`} onClick={(e) => e.stopPropagation()}>
+              <div className="low-stock-modal-head">
+                <h3>{confirmModal.title}</h3>
+                <button type="button" onClick={() => resolveConfirm(false)}>Close</button>
+              </div>
+              <p className="confirm-modal-text">{confirmModal.message}</p>
+              <div className="confirm-modal-actions">
+                <button type="button" className="ghost" onClick={() => resolveConfirm(false)}>{confirmModal.cancelLabel || "Cancel"}</button>
+                <button type="button" className={confirmModal.tone === "danger" ? "row-danger" : ""} onClick={() => resolveConfirm(true)}>{confirmModal.confirmLabel || "Confirm"}</button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    );
+  };
