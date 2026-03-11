@@ -8,6 +8,7 @@ import { SOCKET_EVENTS } from "@pepsi/shared";
 import { enrichSale } from "./seed.js";
 import { getState, getStoreMeta, updateState } from "./store.js";
 import {
+  createAuthUser,
   extractSocketToken,
   getAuthStoreMeta,
   listUsers,
@@ -217,6 +218,15 @@ app.get("/auth/me", requireAuth, (req, res) => {
 
 app.get("/auth/users", requireAuth, requireRole("admin"), (_req, res) => {
   res.json(listUsers());
+});
+
+app.post("/auth/users", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const user = await createAuthUser(req.body || {});
+    res.status(201).json(user);
+  } catch (error) {
+    res.status(400).json({ message: error.message || "Unable to create user" });
+  }
 });
 
 app.get("/state", requireAuth, (_req, res) => {

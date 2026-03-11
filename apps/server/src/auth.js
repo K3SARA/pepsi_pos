@@ -41,7 +41,8 @@ const baselineUserSpecs = [
   { id: "user-admin", role: "admin", username: "admin", name: "Admin User", password: "admin123" },
   { id: "user-rep-1", role: "cashier", username: "rep1", name: "Rep 1", password: "rep123" },
   { id: "user-rep-2", role: "cashier", username: "rep2", name: "Rep 2", password: "rep123" },
-  { id: "user-rep-3", role: "cashier", username: "rep3", name: "Rep 3", password: "rep123" }
+  { id: "user-rep-3", role: "cashier", username: "rep3", name: "Rep 3", password: "rep123" },
+  { id: "user-rep-4", role: "cashier", username: "rep4", name: "Rep 4", password: "rep123" }
 ];
 
 const createBaselineUser = (spec) => ({
@@ -267,6 +268,44 @@ export const revokeRefreshToken = (refreshToken) => {
 
 export const verifyAccessToken = (token) => jwt.verify(token, JWT_SECRET);
 export const listUsers = () => cachedAuthState.users.map(sanitizeUser);
+export const createAuthUser = async ({ username, password, name, role = "cashier" }) => {
+  const cleanUsername = String(username || "").trim().toLowerCase();
+  const cleanPassword = String(password || "");
+  const cleanName = String(name || "").trim();
+  const cleanRole = String(role || "cashier").trim().toLowerCase();
+
+  if (!cleanUsername || !cleanPassword || !cleanName) {
+    throw new Error("name, username and password are required");
+  }
+  if (!["admin", "cashier"].includes(cleanRole)) {
+    throw new Error("Invalid auth role");
+  }
+  if (cleanPassword.length < 4) {
+    throw new Error("Password must be at least 4 characters");
+  }
+
+  const existing = cachedAuthState.users.find((item) => String(item.username || "").trim().toLowerCase() === cleanUsername);
+  if (existing) {
+    throw new Error("Username already exists");
+  }
+
+  const nextUser = {
+    id: `user-${cleanUsername}-${crypto.randomUUID()}`,
+    role: cleanRole,
+    username: cleanUsername,
+    name: cleanName,
+    passwordHash: bcrypt.hashSync(cleanPassword, BCRYPT_ROUNDS),
+    active: true,
+    createdAt: nowIso()
+  };
+
+  updateAuthState((state) => {
+    state.users.push(nextUser);
+    return state;
+  });
+
+  return sanitizeUser(nextUser);
+};
 
 export const getAuthStoreMeta = () => ({
   mode: USE_POSTGRES ? "postgres" : "file",

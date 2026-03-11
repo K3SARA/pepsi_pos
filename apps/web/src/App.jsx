@@ -3,6 +3,7 @@ import { io } from "socket.io-client";
 import { calculateTotals, PAYMENT_TYPES, SOCKET_EVENTS } from "@pepsi/shared";
 import {
   clearAuthSession,
+  createAuthUser,
   createCustomer,
   createProduct,
   createStaff,
@@ -1516,7 +1517,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
   const [notice, setNotice] = useState("");
 
   const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "" });
-  const [staffForm, setStaffForm] = useState({ id: "", name: "", role: "", phone: "" });
+  const [staffForm, setStaffForm] = useState({ id: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
   const [stockMode, setStockMode] = useState("add");
   const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
   const [stockSearch, setStockSearch] = useState("");
@@ -2568,7 +2569,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
   };
 
   const openStaffAdd = () => {
-    setStaffForm({ id: "", name: "", role: "", phone: "" });
+    setStaffForm({ id: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
     setShowStaffForm(true);
   };
 
@@ -2585,7 +2586,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
       id: matched.id,
       name: matched.name || row.name || "",
       role: matched.role || row.role || "",
-      phone: matched.phone || row.phone || ""
+      phone: matched.phone || row.phone || "",
+      username: "",
+      password: "",
+      authRole: "cashier"
     });
     setShowStaffForm(true);
   };
@@ -2595,12 +2599,32 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
       setNotice("Staff name is required.");
       return;
     }
+    if (!staffForm.id) {
+      if (!String(staffForm.username || "").trim()) {
+        setNotice("Username is required for new staff.");
+        return;
+      }
+      if (!String(staffForm.password || "").trim()) {
+        setNotice("Password is required for new staff.");
+        return;
+      }
+    }
     const payload = { name: staffForm.name.trim(), role: staffForm.role, phone: staffForm.phone };
-    const action = staffForm.id ? updateStaff(staffForm.id, payload) : createStaff(payload);
+    const action = staffForm.id
+      ? updateStaff(staffForm.id, payload)
+      : Promise.all([
+        createStaff(payload),
+        createAuthUser({
+          name: staffForm.name.trim(),
+          username: String(staffForm.username || "").trim(),
+          password: String(staffForm.password || ""),
+          role: staffForm.authRole || "cashier"
+        })
+      ]);
     action
       .then(() => {
         setShowStaffForm(false);
-        setNotice("Staff saved.");
+        setNotice(staffForm.id ? "Staff saved." : "User created.");
       })
       .catch((error) => setNotice(error.message));
   };
@@ -3497,6 +3521,16 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm }) => {
                   <input value={staffForm.name} onChange={(e) => setStaffForm((c) => ({ ...c, name: e.target.value }))} placeholder="Staff name" />
                   <input value={staffForm.role} onChange={(e) => setStaffForm((c) => ({ ...c, role: e.target.value }))} placeholder="Role" />
                   <input value={staffForm.phone} onChange={(e) => setStaffForm((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone" />
+                  {!staffForm.id ? (
+                    <>
+                      <input value={staffForm.username} onChange={(e) => setStaffForm((c) => ({ ...c, username: e.target.value }))} placeholder="Username" />
+                      <input type="password" value={staffForm.password} onChange={(e) => setStaffForm((c) => ({ ...c, password: e.target.value }))} placeholder="Password" />
+                      <select value={staffForm.authRole} onChange={(e) => setStaffForm((c) => ({ ...c, authRole: e.target.value }))}>
+                        <option value="cashier">Cashier Login</option>
+                        <option value="admin">Admin Login</option>
+                      </select>
+                    </>
+                  ) : null}
                   <div>
                     <button type="button" onClick={saveStaff}>Save</button>
                     <button type="button" className="ghost" onClick={() => setShowStaffForm(false)}>Cancel</button>

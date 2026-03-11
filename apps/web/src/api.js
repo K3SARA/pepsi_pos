@@ -105,6 +105,11 @@ export const logoutApi = () =>
   }).catch(() => ({ ok: true }));
 
 export const fetchMe = () => request("/auth/me");
+export const createAuthUser = (payload) =>
+  request("/auth/users", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
 export const fetchState = () => request("/state");
 export const fetchDashboard = () => request("/dashboard");
 export const submitSale = (payload) =>
