@@ -54,16 +54,88 @@ const totalPaymentsAmount = (payments = []) => roundMoney(
   payments.reduce((acc, payment) => acc + Number(payment.amount || 0), 0)
 );
 
+const buildCustomerCreditUsagePlan = ({ credits = [], customerName = "", amount = 0 }) => {
+  const normalizedName = String(customerName || "").trim().toLowerCase();
+  let remaining = roundMoney(amount);
+  const usagePlan = [];
+  if (!normalizedName || remaining <= 0) {
+    return { usagePlan, remaining };
+  }
+
+  const eligibleCredits = [...credits]
+    .filter((entry) => String(entry.customerName || "").trim().toLowerCase() === normalizedName)
+    .filter((entry) => Number(entry.remainingAmount ?? entry.amount ?? 0) > 0)
+    .sort((a, b) => new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime());
+
+  for (const entry of eligibleCredits) {
+    if (remaining <= 0) break;
+    const available = roundMoney(entry.remainingAmount ?? entry.amount ?? 0);
+    if (available <= 0) continue;
+    const used = roundMoney(Math.min(available, remaining));
+    if (used <= 0) continue;
+    usagePlan.push({
+      creditId: entry.id,
+      amount: used
+    });
+    remaining = roundMoney(remaining - used);
+  }
+
+  return { usagePlan, remaining };
+};
+
+const restoreCustomerCreditUsage = ({ credits = [], creditPayment = null, saleId = "" }) => {
+  if (!creditPayment?.usagePlan?.length) return;
+  for (const usage of creditPayment.usagePlan) {
+    const creditEntry = credits.find((entry) => String(entry.id) === String(usage.creditId));
+    if (!creditEntry) continue;
+    const currentRemaining = roundMoney(creditEntry.remainingAmount ?? creditEntry.amount ?? 0);
+    creditEntry.remainingAmount = roundMoney(currentRemaining + Number(usage.amount || 0));
+    creditEntry.status = "open";
+    creditEntry.usageHistory = (creditEntry.usageHistory || []).filter((entry) => !(String(entry.saleId || "") === String(saleId) && Number(entry.amount || 0) === roundMoney(usage.amount || 0)));
+  }
+};
+
+const applyCustomerCreditUsage = ({ credits = [], creditPayment = null, customerName = "", amount = 0, saleId = "", username = "system" }) => {
+  const desiredAmount = roundMoney(amount);
+  if (!creditPayment || desiredAmount <= 0) return null;
+  const { usagePlan, remaining } = buildCustomerCreditUsagePlan({ credits, customerName, amount: desiredAmount });
+  if (remaining > 0) {
+    throw new Error("Customer credit exceeds available balance");
+  }
+  for (const usage of usagePlan) {
+    const creditEntry = credits.find((entry) => String(entry.id) === String(usage.creditId));
+    if (!creditEntry) continue;
+    const currentRemaining = roundMoney(creditEntry.remainingAmount ?? creditEntry.amount ?? 0);
+    creditEntry.remainingAmount = roundMoney(Math.max(0, currentRemaining - Number(usage.amount || 0)));
+    creditEntry.status = creditEntry.remainingAmount > 0 ? "partial" : "used";
+    creditEntry.usedAt = new Date().toISOString();
+    creditEntry.usageHistory = creditEntry.usageHistory || [];
+    creditEntry.usageHistory.push({
+      saleId,
+      amount: roundMoney(usage.amount || 0),
+      createdAt: new Date().toISOString(),
+      by: username
+    });
+  }
+  return {
+    ...creditPayment,
+    amount: desiredAmount,
+    usagePlan
+  };
+};
+
 const recalculateSaleFinancials = (sale) => {
   const payments = normalizeSalePayments(sale);
   const cashPayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cash");
   const chequePayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cheque");
+  const allPaidPayments = payments.filter((payment) => Number(payment.amount || 0) > 0);
   const totalCash = totalPaymentsAmount(cashPayments);
   const totalCheque = totalPaymentsAmount(chequePayments);
   const latestCheque = chequePayments.length ? chequePayments[chequePayments.length - 1] : null;
   const returnedAmount = roundMoney(sale.returnedAmount || 0);
-  const netTotalAfterReturns = roundMoney(Math.max(0, Number(sale.total || 0) - returnedAmount));
-  const rawPaid = roundMoney(totalCash + totalCheque);
+  const undeliveredAmount = computeDeliveryAdjustmentsAmount(sale);
+  const netTotalAfterReturns = roundMoney(Math.max(0, Number(sale.total || 0) - returnedAmount - undeliveredAmount));
+  const rawPaid = totalPaymentsAmount(allPaidPayments);
   const paidAmount = roundMoney(Math.min(netTotalAfterReturns, rawPaid));
   const outstandingAmount = roundMoney(Math.max(0, netTotalAfterReturns - paidAmount));
   const refundDueAmount = roundMoney(Math.max(0, rawPaid - netTotalAfterReturns));
@@ -77,6 +149,7 @@ const recalculateSaleFinancials = (sale) => {
     chequeDate: latestCheque?.chequeDate || "",
     chequeBank: latestCheque?.chequeBank || "",
     returnedAmount,
+    undeliveredAmount,
     netTotalAfterReturns,
     paidAmount,
     outstandingAmount,
@@ -113,6 +186,32 @@ const buildReturnLineFinancials = ({ sale, soldLine, quantity }) => {
   };
 };
 
+const computeDeliveryAdjustmentsAmount = (sale, extraAdjustments = []) => {
+  const saleLines = Array.isArray(sale?.lines) ? sale.lines : [];
+  const qtyByProduct = new Map();
+  const allAdjustments = [...(Array.isArray(sale?.deliveryAdjustments) ? sale.deliveryAdjustments : []), ...extraAdjustments];
+
+  for (const adj of allAdjustments) {
+    for (const line of (adj?.lines || [])) {
+      const key = String(line.productId || "").trim();
+      if (!key) continue;
+      qtyByProduct.set(key, Number(qtyByProduct.get(key) || 0) + Number(line.quantity || 0));
+    }
+  }
+
+  let total = 0;
+  for (const soldLine of saleLines) {
+    const key = String(soldLine.productId || "").trim();
+    if (!key) continue;
+    const soldQty = Number(soldLine.quantity || 0);
+    const undeliveredQty = Math.min(soldQty, Number(qtyByProduct.get(key) || 0));
+    if (undeliveredQty <= 0) continue;
+    total += Number(buildReturnLineFinancials({ sale, soldLine, quantity: undeliveredQty }).returnAmount || 0);
+  }
+
+  return roundMoney(total);
+};
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -125,7 +224,11 @@ app.use(cors({ origin: process.env.CORS_ORIGIN?.split(",") || "*" }));
 app.use(express.json());
 
 const sendFullSync = () => {
-  io.emit(SOCKET_EVENTS.STATE_SYNC, getState());
+  const state = getState();
+  io.emit(SOCKET_EVENTS.STATE_SYNC, {
+    ...state,
+    sales: (state.sales || []).map((sale) => recalculateSaleFinancials(sale))
+  });
 };
 
 app.get("/health", (_req, res) => {
@@ -145,9 +248,10 @@ app.get("/db/readonly", (req, res) => {
   }
 
   const state = getState();
+  const normalizedSales = (state.sales || []).map((sale) => recalculateSaleFinancials(sale));
   const today = new Date().toISOString().slice(0, 10);
-  const todaySales = (state.sales || []).filter((sale) => String(sale.createdAt || "").slice(0, 10) === today);
-  const todayRevenue = todaySales.reduce((acc, sale) => acc + Number(sale.total || 0), 0);
+  const todaySales = normalizedSales.filter((sale) => String(sale.createdAt || "").slice(0, 10) === today);
+  const todayRevenue = todaySales.reduce((acc, sale) => acc + Number(sale.netTotalAfterReturns || 0), 0);
 
   res.json({
     now: new Date().toISOString(),
@@ -159,18 +263,18 @@ app.get("/db/readonly", (req, res) => {
       products: (state.products || []).length,
       customers: (state.customers || []).length,
       staff: (state.staff || []).length,
-      sales: (state.sales || []).length,
+      sales: normalizedSales.length,
       returns: (state.returns || []).length,
       todaySales: todaySales.length,
       todayRevenue: Number(todayRevenue.toFixed(2))
     },
-    latestSales: (state.sales || []).slice(0, 20).map((sale) => ({
+    latestSales: normalizedSales.slice(0, 20).map((sale) => ({
       id: sale.id,
       createdAt: sale.createdAt,
       rep: sale.cashier || "-",
       customer: sale.customerName || "-",
       lorry: sale.lorry || "-",
-      total: Number(sale.total || 0)
+      total: Number(sale.netTotalAfterReturns || 0)
     }))
   });
 });
@@ -230,7 +334,11 @@ app.post("/auth/users", requireAuth, requireRole("admin"), async (req, res) => {
 });
 
 app.get("/state", requireAuth, (_req, res) => {
-  res.json(getState());
+  const state = getState();
+  res.json({
+    ...state,
+    sales: (state.sales || []).map((sale) => recalculateSaleFinancials(sale))
+  });
 });
 
 app.get("/products", requireAuth, (_req, res) => {
@@ -479,6 +587,7 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
   const lorry = String(body.lorry || "").trim();
   const customerPhone = String(body.customerPhone || "").trim();
   const paymentType = String(body.paymentType || "cash");
+  const customerCreditAmount = roundMoney(Number(body.customerCreditAmount || 0));
   const cashReceived = Number(body.cashReceived || 0);
   const creditDueDate = String(body.creditDueDate || "").trim();
   const chequeAmount = Number(body.chequeAmount || 0);
@@ -488,6 +597,10 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
 
   if (!lines.length) {
     res.status(400).json({ message: "Cart is empty" });
+    return;
+  }
+  if (!Number.isFinite(customerCreditAmount) || customerCreditAmount < 0) {
+    res.status(400).json({ message: "customerCreditAmount must be 0 or more" });
     return;
   }
   if (!["Lorry A", "Lorry B"].includes(lorry)) {
@@ -570,6 +683,36 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
     lines: preparedLines
   });
 
+  const preparedCustomerName = String(prepared.customerName || "").trim();
+  if (customerCreditAmount > 0) {
+    if (!preparedCustomerName || preparedCustomerName.toLowerCase() === "walk-in") {
+      res.status(409).json({ message: "Customer credit can be used only for saved customers" });
+      return;
+    }
+    if (customerCreditAmount > roundMoney(Number(prepared.total || 0))) {
+      res.status(409).json({ message: "Customer credit cannot exceed bill total" });
+      return;
+    }
+    const { usagePlan, remaining } = buildCustomerCreditUsagePlan({
+      credits: state.customerCredits || [],
+      customerName: preparedCustomerName,
+      amount: customerCreditAmount
+    });
+    if (remaining > 0) {
+      res.status(409).json({ message: "Customer credit exceeds available balance" });
+      return;
+    }
+    prepared.payments = [{
+      id: nanoid(12),
+      method: "customer_credit",
+      amount: customerCreditAmount,
+      createdAt: new Date().toISOString(),
+      receivedBy: req.user?.username || "system",
+      usagePlan
+    }];
+    prepared.customerCreditApplied = customerCreditAmount;
+  }
+
   prepared.cashReceived = null;
   prepared.creditDueDate = creditDueDate || "";
   prepared.chequeAmount = null;
@@ -616,6 +759,26 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
       });
     }
 
+    if (Number(prepared.customerCreditApplied || 0) > 0) {
+      draft.customerCredits = draft.customerCredits || [];
+      const creditPayment = (prepared.payments || []).find((payment) => String(payment.method || "").toLowerCase() === "customer_credit");
+      for (const usage of (creditPayment?.usagePlan || [])) {
+        const creditEntry = draft.customerCredits.find((entry) => String(entry.id) === String(usage.creditId));
+        if (!creditEntry) continue;
+        const currentRemaining = roundMoney(creditEntry.remainingAmount ?? creditEntry.amount ?? 0);
+        creditEntry.remainingAmount = roundMoney(Math.max(0, currentRemaining - Number(usage.amount || 0)));
+        creditEntry.status = creditEntry.remainingAmount > 0 ? "partial" : "used";
+        creditEntry.usedAt = new Date().toISOString();
+        creditEntry.usageHistory = creditEntry.usageHistory || [];
+        creditEntry.usageHistory.push({
+          saleId: prepared.id,
+          amount: roundMoney(usage.amount || 0),
+          createdAt: new Date().toISOString(),
+          by: req.user?.username || "system"
+        });
+      }
+    }
+
     return draft;
   });
 
@@ -640,6 +803,8 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
     res.status(404).json({ message: "Sale not found" });
     return;
   }
+  const nextPaymentType = String(body.paymentType || sale?.paymentType || "").trim();
+  const nextBillDiscount = Math.max(0, Number(body.discount || 0) || 0);
 
   const saleCashier = String(sale.cashier || "").trim().toLowerCase();
   const actingUser = String(req.user?.username || "").trim().toLowerCase();
@@ -652,6 +817,11 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
   const hasReturns = (state.returns || []).some((ret) => String(ret.saleId) === String(sale.id));
   if (hasReturns) {
     res.status(409).json({ message: "Cannot edit sale after returns have been submitted" });
+    return;
+  }
+  const hasDeliveryAdjustments = Array.isArray(sale.deliveryAdjustments) && sale.deliveryAdjustments.length > 0;
+  if (sale.deliveryConfirmedAt || hasDeliveryAdjustments) {
+    res.status(409).json({ message: "Cannot edit sale after delivery processing has started" });
     return;
   }
 
@@ -712,15 +882,60 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
     }
   }
 
-    const existingPayments = normalizeSalePayments(sale);
+  const existingPayments = normalizeSalePayments(sale);
+  const existingCreditPayment = existingPayments.find((payment) => String(payment.method || "").toLowerCase() === "customer_credit") || null;
+  const editSubTotal = roundMoney(preparedLines.reduce((acc, line) => acc + (Number(line.price || 0) * Number(line.quantity || 0)), 0));
+  if (nextBillDiscount > editSubTotal) {
+    res.status(409).json({ message: `Total bill discount cannot exceed subtotal (${editSubTotal.toFixed(2)})` });
+    return;
+  }
 
-      const recalculated = recalculateSaleFinancials(enrichSale({
-        ...sale,
-        paymentType: nextPaymentType || sale.paymentType,
-        payments: existingPayments,
-        lines: preparedLines,
-        taxRate: 0
-      }));
+  const simulatedCredits = (state.customerCredits || []).map((entry) => ({
+    ...entry,
+    usageHistory: [...(entry.usageHistory || [])]
+  }));
+  restoreCustomerCreditUsage({ credits: simulatedCredits, creditPayment: existingCreditPayment, saleId: sale.id });
+
+  const nextPayments = existingPayments.filter((payment) => String(payment.method || "").toLowerCase() !== "customer_credit");
+  if (existingCreditPayment) {
+    const desiredCreditAmount = roundMoney(Math.min(Number(existingCreditPayment.amount || 0), Number(enrichSale({
+      ...sale,
+      paymentType: nextPaymentType || sale.paymentType,
+      discount: nextBillDiscount,
+      discountAmount: nextBillDiscount,
+      payments: nextPayments,
+      lines: preparedLines,
+      taxRate: 0
+    }).total || 0)));
+    if (desiredCreditAmount > 0) {
+      try {
+        const rebalancedCreditPayment = applyCustomerCreditUsage({
+          credits: simulatedCredits,
+          creditPayment: existingCreditPayment,
+          customerName: sale.customerName,
+          amount: desiredCreditAmount,
+          saleId: sale.id,
+          username: req.user?.username || "system"
+        });
+        if (rebalancedCreditPayment) {
+          nextPayments.push(rebalancedCreditPayment);
+        }
+      } catch (error) {
+        res.status(409).json({ message: error.message || "Unable to rebalance customer credit for edited bill" });
+        return;
+      }
+    }
+  }
+
+  const recalculated = recalculateSaleFinancials(enrichSale({
+    ...sale,
+    paymentType: nextPaymentType || sale.paymentType,
+    discount: nextBillDiscount,
+    discountAmount: nextBillDiscount,
+    payments: nextPayments,
+    lines: preparedLines,
+    taxRate: 0
+  }));
 
   const next = updateState((draft) => {
     const idx = draft.sales.findIndex((item) => String(item.id) === String(id));
@@ -732,6 +947,22 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
       const oldQty = Number(oldQtyByProduct.get(productId) || 0);
       const nextQty = Number(newQtyByProduct.get(productId) || 0);
       product.stock = Number((Number(product.stock || 0) + oldQty - nextQty).toFixed(2));
+    }
+
+    if (existingCreditPayment) {
+      draft.customerCredits = draft.customerCredits || [];
+      restoreCustomerCreditUsage({ credits: draft.customerCredits, creditPayment: existingCreditPayment, saleId: sale.id });
+      const nextCreditPayment = nextPayments.find((payment) => String(payment.method || "").toLowerCase() === "customer_credit");
+      if (nextCreditPayment) {
+        applyCustomerCreditUsage({
+          credits: draft.customerCredits,
+          creditPayment: nextCreditPayment,
+          customerName: sale.customerName,
+          amount: Number(nextCreditPayment.amount || 0),
+          saleId: sale.id,
+          username: req.user?.username || "system"
+        });
+      }
     }
 
     draft.sales[idx] = recalculated;
@@ -759,6 +990,11 @@ app.delete("/sales/:id", requireAuth, requireRole("admin", "cashier"), (req, res
       return;
     }
   }
+  const hasDeliveryProcessing = Boolean(sale.deliveryConfirmedAt) || (Array.isArray(sale.deliveryAdjustments) && sale.deliveryAdjustments.length > 0);
+  if (hasDeliveryProcessing) {
+    res.status(409).json({ message: "Cannot delete sale after delivery processing has started" });
+    return;
+  }
 
   const returnedByProduct = new Map();
   for (const ret of (state.returns || [])) {
@@ -767,6 +1003,7 @@ app.delete("/sales/:id", requireAuth, requireRole("admin", "cashier"), (req, res
       returnedByProduct.set(line.productId, (returnedByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
     }
   }
+  const creditPayment = normalizeSalePayments(sale).find((payment) => String(payment.method || "").toLowerCase() === "customer_credit");
 
   const next = updateState((draft) => {
     // Restore only net sold qty not already returned.
@@ -777,6 +1014,10 @@ app.delete("/sales/:id", requireAuth, requireRole("admin", "cashier"), (req, res
       const alreadyReturned = Number(returnedByProduct.get(line.productId) || 0);
       const netSold = Math.max(0, sold - alreadyReturned);
       product.stock = Number((Number(product.stock || 0) + netSold).toFixed(2));
+    }
+    if (creditPayment?.usagePlan?.length) {
+      draft.customerCredits = draft.customerCredits || [];
+      restoreCustomerCreditUsage({ credits: draft.customerCredits, creditPayment, saleId: sale.id });
     }
     draft.sales = (draft.sales || []).filter((item) => String(item.id) !== String(id));
     draft.returns = (draft.returns || []).filter((ret) => String(ret.saleId) !== String(id));
@@ -824,6 +1065,14 @@ app.post("/returns", requireAuth, requireRole("cashier", "admin"), (req, res) =>
     }
   }
 
+  const undeliveredByProduct = new Map();
+  for (const adjustment of (sale.deliveryAdjustments || [])) {
+    for (const line of (adjustment.lines || [])) {
+      const key = line.productId;
+      undeliveredByProduct.set(key, (undeliveredByProduct.get(key) || 0) + Number(line.quantity || 0));
+    }
+  }
+
   const saleLineByProduct = new Map((sale.lines || []).map((line) => [line.productId, line]));
   const preparedLines = [];
   for (const incoming of lines) {
@@ -845,7 +1094,8 @@ app.post("/returns", requireAuth, requireRole("cashier", "admin"), (req, res) =>
     }
     const soldQty = Number(soldLine.quantity || 0);
     const alreadyReturned = Number(returnedByProduct.get(productId) || 0);
-    const remaining = soldQty - alreadyReturned;
+    const alreadyUndelivered = Number(undeliveredByProduct.get(productId) || 0);
+    const remaining = soldQty - alreadyReturned - alreadyUndelivered;
     if (quantity > remaining) {
       res.status(409).json({ message: `Return exceeds remaining qty for ${soldLine.name}` });
       return;
@@ -891,8 +1141,27 @@ app.post("/returns", requireAuth, requireRole("cashier", "admin"), (req, res) =>
       const saleIndex = (draft.sales || []).findIndex((item) => String(item.id) === saleId);
       if (saleIndex !== -1) {
         const targetSale = draft.sales[saleIndex];
+        const previousRefundDue = roundMoney(Number(targetSale.refundDueAmount || 0));
         targetSale.returnedAmount = roundMoney(Number(targetSale.returnedAmount || 0) + returnTotalAmount);
-        draft.sales[saleIndex] = recalculateSaleFinancials(targetSale);
+        const recalculatedSale = recalculateSaleFinancials(targetSale);
+        draft.sales[saleIndex] = recalculatedSale;
+        const nextRefundDue = roundMoney(Number(recalculatedSale.refundDueAmount || 0));
+        const newCreditAmount = roundMoney(Math.max(0, nextRefundDue - previousRefundDue));
+        const customerName = String(recalculatedSale.customerName || "").trim();
+        if (newCreditAmount > 0 && customerName && customerName.toLowerCase() !== "walk-in") {
+          draft.customerCredits = draft.customerCredits || [];
+          draft.customerCredits.unshift({
+            id: nanoid(12),
+            customerName,
+            saleId: String(saleId),
+            returnId: record.id,
+            amount: newCreditAmount,
+            remainingAmount: newCreditAmount,
+            status: "open",
+            createdAt: new Date().toISOString(),
+            createdBy: req.user?.username || "system"
+          });
+        }
       }
       return draft;
     });
@@ -968,8 +1237,15 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
     });
   }
 
-    const existingPayments = normalizeSalePayments(sale);
-    if (markConfirmed) {
+  const adjustmentRecord = preparedLines.length ? {
+    id: nanoid(12),
+    createdAt: new Date().toISOString(),
+    by: req.user?.username || "admin",
+    lines: preparedLines
+  } : null;
+
+  const existingPayments = normalizeSalePayments(sale);
+  if (markConfirmed) {
     if (!Number.isFinite(cashReceived) || cashReceived < 0) {
       res.status(400).json({ message: "Cash received must be 0 or more" });
       return;
@@ -992,21 +1268,15 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
         return;
       }
     }
-      const existingPaid = totalPaymentsAmount(existingPayments);
-      const maxCollectible = roundMoney(Math.max(0, Number(sale.total || 0) - Number(sale.returnedAmount || 0)));
-      const totalPaid = existingPaid + Number(cashReceived || 0) + Number(chequeAmount || 0);
-      if (totalPaid > maxCollectible) {
+    const existingPaid = totalPaymentsAmount(existingPayments);
+    const incomingPaid = roundMoney(Number(cashReceived || 0) + Number(chequeAmount || 0));
+    const projectedUndeliveredAmount = computeDeliveryAdjustmentsAmount(sale, adjustmentRecord ? [adjustmentRecord] : []);
+    const maxCollectible = roundMoney(Math.max(0, Number(sale.total || 0) - Number(sale.returnedAmount || 0) - projectedUndeliveredAmount));
+    if (incomingPaid > roundMoney(Math.max(0, maxCollectible - existingPaid))) {
         res.status(409).json({ message: "Cash and cheque total cannot exceed bill total" });
         return;
-      }
+    }
   }
-
-  const adjustmentRecord = preparedLines.length ? {
-    id: nanoid(12),
-    createdAt: new Date().toISOString(),
-    by: req.user?.username || "admin",
-    lines: preparedLines
-  } : null;
 
   const next = updateState((draft) => {
     const idx = (draft.sales || []).findIndex((item) => String(item.id) === String(id));
@@ -1022,6 +1292,7 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
       }
     }
       if (markConfirmed) {
+        const previousRefundDue = roundMoney(Number(target.refundDueAmount || 0));
         target.payments = normalizeSalePayments(target);
         if (cashReceived > 0) {
           target.payments.push({
@@ -1044,9 +1315,32 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
             receivedBy: req.user?.username || "admin"
           });
         }
-        target.deliveryConfirmedAt = new Date().toISOString();
-        target.deliveryConfirmedBy = req.user?.username || "admin";
+        if (!target.deliveryConfirmedAt) {
+          target.deliveryConfirmedAt = new Date().toISOString();
+        }
+        if (!target.deliveryConfirmedBy) {
+          target.deliveryConfirmedBy = req.user?.username || "admin";
+        }
         draft.sales[idx] = recalculateSaleFinancials(target);
+        const recalculatedSale = draft.sales[idx];
+        const nextRefundDue = roundMoney(Number(recalculatedSale.refundDueAmount || 0));
+        const newCreditAmount = roundMoney(Math.max(0, nextRefundDue - previousRefundDue));
+        const customerName = String(recalculatedSale.customerName || "").trim();
+        if (newCreditAmount > 0 && customerName && customerName.toLowerCase() !== "walk-in") {
+          draft.customerCredits = draft.customerCredits || [];
+          draft.customerCredits.unshift({
+            id: nanoid(12),
+            customerName,
+            saleId: String(id),
+            returnId: "",
+            amount: newCreditAmount,
+            remainingAmount: newCreditAmount,
+            status: "open",
+            createdAt: new Date().toISOString(),
+            createdBy: req.user?.username || "system",
+            source: "delivery_adjustment"
+          });
+        }
       }
       return draft;
     });
@@ -1059,7 +1353,7 @@ app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, 
 
 app.get("/dashboard", requireAuth, (_req, res) => {
   const state = getState();
-  const sales = state.sales;
+  const sales = (state.sales || []).map((sale) => recalculateSaleFinancials(sale));
 
   const today = new Date();
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();

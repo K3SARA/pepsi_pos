@@ -146,6 +146,44 @@ const salePayments = (sale) => {
   }
   return migrated;
 };
+const saleDisplayPaymentInfo = (sale) => {
+  const payments = salePayments(sale).filter((payment) => Number(payment.amount || 0) > 0);
+  const methods = [...new Set(payments.map((payment) => String(payment.method || "").toLowerCase()).filter(Boolean))];
+  if (!methods.length) {
+    const fallbackType = String(sale?.paymentType || "").trim().toLowerCase();
+    return {
+      label: String(sale?.paymentType || "").toUpperCase() || "-",
+      detail: fallbackType === "credit" && sale?.creditDueDate ? `DUE ${sale.creditDueDate}` : ""
+    };
+  }
+  if (methods.length === 1) {
+    const method = methods[0];
+    if (method === "cheque") {
+      const latestCheque = [...payments].reverse().find((payment) => String(payment.method || "").toLowerCase() === "cheque");
+      const detailParts = [];
+      if (latestCheque?.chequeDate) detailParts.push(`DATE ${latestCheque.chequeDate}`);
+      if (latestCheque?.chequeNo) detailParts.push(`NO ${latestCheque.chequeNo}`);
+      return {
+        label: "CHEQUE",
+        detail: detailParts.join(" • ")
+      };
+    }
+    if (method === "customer_credit") {
+      return {
+        label: "CUSTOMER CREDIT",
+        detail: ""
+      };
+    }
+    return {
+      label: method.toUpperCase(),
+      detail: ""
+    };
+  }
+  return {
+    label: "MIXED",
+    detail: methods.map((method) => method === "customer_credit" ? "CUSTOMER CREDIT" : method.toUpperCase()).join(" + ")
+  };
+};
 const returnLinePreview = (sale, line, quantity = 0) => {
   const qty = Number(quantity || 0);
   const soldQty = Number(line?.quantity || 0);
@@ -218,6 +256,16 @@ const saleReturnedQtyByProduct = (sale, returns = []) => {
   }
   return map;
 };
+const saleLineRevenueForQty = (sale, line, quantity = 0) => {
+  const qty = Math.max(0, Number(quantity || 0));
+  const unitPrice = Number(line?.price || 0);
+  const grossAmount = Number((unitPrice * qty).toFixed(2));
+  const saleSubTotal = Number(sale?.subTotal || 0);
+  const billDiscountShare = saleSubTotal > 0
+    ? Number((Number(sale?.discountAmount || sale?.discount || 0) * (grossAmount / saleSubTotal)).toFixed(2))
+    : 0;
+  return Math.max(0, Number((grossAmount - billDiscountShare).toFixed(2)));
+};
 const effectiveSaleLineState = (sale, line, { returnedByProduct = new Map(), undeliveredByProduct = new Map() } = {}) => {
   const orderedQty = Number(line?.quantity || 0);
   const undeliveredQty = Math.min(orderedQty, Number(undeliveredByProduct.get(String(line?.productId || "")) || 0));
@@ -226,10 +274,8 @@ const effectiveSaleLineState = (sale, line, { returnedByProduct = new Map(), und
   const effectiveQty = Math.max(0, soldQty - returnedQty);
   const unitPrice = Number(line?.price || 0);
   const grossEffective = Number((unitPrice * effectiveQty).toFixed(2));
-  const billDiscountShare = Number(sale?.subTotal || 0) > 0
-    ? Number((Number(sale?.discountAmount || sale?.discount || 0) * (grossEffective / Number(sale?.subTotal || 1))).toFixed(2))
-    : 0;
-  const effectiveRevenue = Math.max(0, Number((grossEffective - billDiscountShare).toFixed(2)));
+  const billDiscountShare = Number((grossEffective - saleLineRevenueForQty(sale, line, effectiveQty)).toFixed(2));
+  const effectiveRevenue = saleLineRevenueForQty(sale, line, effectiveQty);
   return {
     orderedQty,
     undeliveredQty,
@@ -257,6 +303,14 @@ const saleCustomerCreditApplied = (sale) => Number(
     .reduce((acc, payment) => acc + Number(payment.amount || 0), 0)
     .toFixed(2)
 );
+const localDateKey = (value) => {
+  const date = value instanceof Date ? new Date(value) : new Date(value || Date.now());
+  if (Number.isNaN(date.getTime())) return "";
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 const openSaleReceiptPrint = ({
   sale,
@@ -265,6 +319,7 @@ const openSaleReceiptPrint = ({
   fallbackCustomerName = "",
   onPopupBlocked = () => {},
   returnByProduct = new Map(),
+  undeliveredByProduct = new Map(),
   returnedAmountOverride = null,
   totalOverride = null
 }) => {
@@ -285,7 +340,9 @@ const openSaleReceiptPrint = ({
     const lines = baseLines.map((line) => {
       const returned = returnByProduct?.get?.(String(line?.productId || "")) || { qty: 0, amount: 0 };
       const originalQty = Number(line?.quantity || 0);
-      const qty = Math.max(0, originalQty - Number(returned.qty || 0));
+      const undeliveredQty = Number(undeliveredByProduct?.get?.(String(line?.productId || "")) || 0);
+      const soldAfterDelivery = Math.max(0, originalQty - undeliveredQty);
+      const qty = Math.max(0, soldAfterDelivery - Number(returned.qty || 0));
       const product = (products || []).find((p) => p.id === line?.productId);
       const billingPrice = Number(line?.basePrice ?? line?.price ?? product?.billingPrice ?? product?.price ?? 0);
       const itemDiscount = lineItemDiscount(line);
@@ -297,6 +354,10 @@ const openSaleReceiptPrint = ({
         ? Number((Number(sale?.discountAmount || sale?.discount || 0) * (grossRemaining / saleSubTotal)).toFixed(2))
         : 0;
       const total = Math.max(0, Number((grossRemaining - remainingBillDiscountShare).toFixed(2)));
+      const bundleSource = product || line;
+      const bundleSize = getBundleSize(bundleSource);
+      const bundles = bundleSize ? Math.floor(qty / bundleSize) : 0;
+      const singles = bundleSize ? qty % bundleSize : qty;
       return {
         sku,
         qty,
@@ -304,9 +365,13 @@ const openSaleReceiptPrint = ({
         itemDiscount,
         billDiscountShare: remainingBillDiscountShare,
         total,
+        undeliveredQty,
         returnedQty: Number(returned.qty || 0),
         returnedAmount: Number(returned.amount || 0),
-        originalQty
+        originalQty,
+        bundles,
+        singles,
+        bundleSize
       };
     }).filter((line) => line.qty > 0 || line.total > 0);
 
@@ -321,14 +386,11 @@ const openSaleReceiptPrint = ({
         : saleNetTotal(sale)
     );
   const customerCreditApplied = saleCustomerCreditApplied(sale);
+  const paymentDisplay = saleDisplayPaymentInfo(sale);
 
-  const minRows = lines.length > 8 ? 0 : 8;
-  const rowsHtml = [...lines, ...Array.from({ length: Math.max(0, minRows - lines.length) }).map(() => null)]
-    .map((line) => {
-      if (!line) return "<tr><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>";
-        return `<tr><td>${escapeHtml(line.sku)}${line.returnedQty > 0 ? `<div class="return-print-note">Returned ${line.returnedQty}</div>` : ""}</td><td>${line.qty}</td><td>${toMoney(line.billingPrice)}</td><td>${toMoney(line.itemDiscount)}${line.billDiscountShare > 0 ? `<div class="return-print-note">Bill disc. ${toMoney(line.billDiscountShare)}</div>` : ""}</td><td>${toMoney(line.total)}${line.returnedAmount > 0 ? `<div class="return-print-note">- ${toMoney(line.returnedAmount)}</div>` : ""}</td></tr>`;
-      })
-      .join("");
+  const rowsHtml = lines
+    .map((line) => `<tr><td>${escapeHtml(line.sku)}${line.undeliveredQty > 0 ? `<div class="return-print-note">Not Delivered ${line.undeliveredQty}</div>` : ""}${line.returnedQty > 0 ? `<div class="return-print-note">Returned ${line.returnedQty}</div>` : ""}</td><td>${line.qty}${line.bundleSize > 0 ? `<div class="return-print-note">${line.bundles} Bundles ${line.singles} Singles</div>` : ""}</td><td>${toMoney(line.billingPrice)}</td><td>${toMoney(line.itemDiscount)}${line.billDiscountShare > 0 ? `<div class="return-print-note">Bill disc. ${toMoney(line.billDiscountShare)}</div>` : ""}</td><td>${toMoney(line.total)}${line.returnedAmount > 0 ? `<div class="return-print-note">- ${toMoney(line.returnedAmount)}</div>` : ""}</td></tr>`)
+    .join("");
 
   const printWindow = window.open("", "_blank", "width=1000,height=1300");
   if (!printWindow) {
@@ -338,13 +400,13 @@ const openSaleReceiptPrint = ({
 
   const receiptHtml = `<!doctype html><html><head><meta charset="utf-8" /><title>Receipt #${escapeHtml(sale.id)}</title><style>
 @page { size: A4 portrait; margin: 10mm; } body { margin: 0; background: #fff; font-family: "Segoe UI", Arial, sans-serif; color: #111; }
-.sheet { width: 100%; max-width: 190mm; margin: 0 auto; padding: 4mm; } .header { background: #dfe1e4; border: 1px solid #ced2d8; padding: 10px 12px; display: grid; grid-template-columns: 130px 1fr; gap: 14px; align-items: center; }
-.logo-wrap { display: grid; justify-items: center; gap: 4px; } .logo-wrap img { width: 100px; height: 100px; object-fit: contain; }
-.brand-title { text-align: center; font-weight: 900; font-size: 26px; line-height: 1.05; letter-spacing: 0.4px; text-transform: uppercase; }
-.brand-sub { margin: 10px auto 0; width: fit-content; background: #fff; border-radius: 14px; padding: 8px 20px; font-size: 22px; font-weight: 700; }
+.sheet { width: 100%; max-width: 190mm; margin: 0 auto; padding: 4mm; } .header { background: linear-gradient(180deg, #dadde2 0%, #d4d8de 100%); border: 1px solid #ced2d8; padding: 12px 14px; display: grid; grid-template-columns: 96px 1fr; gap: 16px; align-items: center; }
+.logo-wrap { display: grid; justify-items: center; align-content: center; gap: 2px; } .logo-wrap img { width: 72px; height: 72px; object-fit: contain; } .logo-wrap span { font-size: 10px; color: #1d3f74; font-weight: 700; letter-spacing: 0.02em; }
+.brand-title { text-align: center; font-weight: 900; font-size: 23px; line-height: 1.02; letter-spacing: 0.28px; text-transform: uppercase; }
+.brand-sub { margin: 8px auto 0; width: fit-content; background: rgba(255,255,255,0.96); border: 1px solid #d9dde4; box-shadow: inset 0 1px 0 rgba(255,255,255,0.75); border-radius: 999px; padding: 6px 18px 7px; font-size: 18px; font-weight: 800; letter-spacing: 0.01em; }
 .meta { margin-top: 12px; border: 1px solid #1f2937; border-radius: 16px; padding: 8px 10px; display: grid; grid-template-columns: 54px 1fr; gap: 12px; align-items: start; }
   .meta-box { border: 1px solid #1f2937; height: 76px; margin-top: 4px; } .meta-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.86fr); gap: 4px 20px; font-size: 16px; line-height: 1.2; align-items: start; }
-  .dots { border-bottom: 1px dotted #222; min-width: 150px; display: inline-block; margin-left: 5px; } table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
+  .dots { border-bottom: 1px dotted #222; min-width: 150px; display: inline-block; margin-left: 5px; } .invoice-dots { border-bottom-style: solid; border-bottom-color: #0f4fa8; color: #0f2d56; font-weight: 900; background: linear-gradient(180deg, rgba(220,236,255,0.45) 0%, rgba(220,236,255,0) 100%); padding: 0 4px 1px; border-radius: 6px; } table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 16px; }
   th, td { border: 1px solid #111; padding: 4px 6px; text-align: left; height: 26px; } th { background: #d9e0ea; font-size: 16px; font-weight: 800; text-transform: uppercase; }
   th:nth-child(2), td:nth-child(2), th:nth-child(3), td:nth-child(3), th:nth-child(4), td:nth-child(4), th:nth-child(5), td:nth-child(5) { text-align: center; }
   .return-print-note { margin-top: 2px; color: #9f1d1d; font-size: 11px; font-weight: 700; line-height: 1.2; }
@@ -353,10 +415,10 @@ const openSaleReceiptPrint = ({
 .notes li { margin-bottom: 3px; } .signatures { margin-top: 70px; display: grid; grid-template-columns: 1fr 1fr; gap: 30px; text-align: center; font-size: 18px; }
 .sign-line { margin-bottom: 8px; letter-spacing: 2px; } .powered { text-align: center; margin-top: 80px; font-size: 20px; }
   </style></head><body><div class="sheet">
-<div class="header"><div class="logo-wrap"><img src="/pepsi-logo.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
-<div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div></div><div>Invoice No : <span class="dots">${escapeHtml(sale?.id || "-")}</span></div></div></div>
+<div class="header"><div class="logo-wrap"><img src="/invoice-pepsi.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
+<div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div></div><div>Invoice No : <span class="dots invoice-dots">${escapeHtml(sale?.id || "-")}</span></div></div></div>
 <table><thead><tr><th>Item Code</th><th>Qty</th><th>Billing Price</th><th>Item Discount</th><th>Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
- <div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(printedTotal)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div>${customerCreditApplied > 0 ? `<div>CUSTOMER CREDIT : - LKR ${toMoney(customerCreditApplied)}</div>` : ""}${returnedAmount > 0 ? `<div>RETURNS : - LKR ${toMoney(returnedAmount)}</div>` : ""}<div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div></div></div>
+ <div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(printedTotal)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div>${customerCreditApplied > 0 ? `<div>CUSTOMER CREDIT : - LKR ${toMoney(customerCreditApplied)}</div>` : ""}${returnedAmount > 0 ? `<div>RETURNS : - LKR ${toMoney(returnedAmount)}</div>` : ""}<div>${escapeHtml(paymentDisplay.label)}${paymentDisplay.detail ? ` (${escapeHtml(paymentDisplay.detail)})` : ""}</div></div></div>
 <ul class="notes"><li>Return or exchange only with this receipt</li><li>Credit Payment for all goods shall be made No later than 14 days</li></ul>
 <div class="signatures"><div><div class="sign-line">.......................................</div><div>Customer Signature</div><div>Rubber Stamp</div></div><div><div class="sign-line">.......................................</div><div>P.S.R Signature</div></div></div>
 <div class="powered">Powered By J&amp;Co.</div></div></body></html>`;
@@ -1664,6 +1726,7 @@ const CashierView = ({
 
 const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleDeleted }) => {
   const [showLowStock, setShowLowStock] = useState(false);
+  const [showChequeAlertDetails, setShowChequeAlertDetails] = useState(false);
   const [selectedRep, setSelectedRep] = useState("");
   const [chartDateFrom, setChartDateFrom] = useState("");
   const [chartDateTo, setChartDateTo] = useState("");
@@ -1872,14 +1935,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       for (const sale of state.sales) {
         if (!inDateRange(sale.createdAt, loadingDateFrom, loadingDateTo)) continue;
         if (sale.lorry !== lorryName) continue;
+        if (sale.deliveryConfirmedAt) continue;
         for (const line of (sale.lines || [])) {
           const key = line.productId || line.name;
           const info = productInfoById.get(line.productId) || { name: line.name || "Unknown Item", sku: "-", size: "", category: "" };
           const row = map.get(key) || { key, name: info.name, sku: info.sku, size: info.size || "", category: info.category || "", qty: 0, value: 0 };
           const qty = Number(line.quantity || 0);
-          const unit = Number(line.price || 0);
           row.qty += qty;
-          row.value += qty * unit;
+          row.value += saleLineRevenueForQty(sale, line, qty);
           map.set(key, row);
         }
       }
@@ -1902,7 +1965,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         for (const line of (sale.lines || [])) {
           const lineKey = line.productId || line.name;
           const lineState = effectiveSaleLineState(sale, line, { returnedByProduct, undeliveredByProduct });
-          deliveredByProduct.set(lineKey, (deliveredByProduct.get(lineKey) || 0) + lineState.effectiveQty);
+          const current = deliveredByProduct.get(lineKey) || { qty: 0, value: 0 };
+          current.qty += lineState.effectiveQty;
+          current.value += lineState.effectiveRevenue;
+          deliveredByProduct.set(lineKey, current);
         }
       }
       return [...map.values()]
@@ -1910,10 +1976,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           const bundleSize = getBundleSize(row);
           const bundles = bundleSize ? Math.floor(row.qty / bundleSize) : 0;
           const balance = bundleSize ? row.qty % bundleSize : row.qty;
-          const deliveredRaw = Number(deliveredByProduct.get(row.key) || 0);
-          const returned = Number(returnedByProduct.get(row.key) || 0);
-          const deliveredQty = Math.max(0, deliveredRaw);
-          const deliveredValue = row.qty > 0 ? (row.value * (Math.min(deliveredQty, row.qty) / row.qty)) : 0;
+          const deliveredRaw = deliveredByProduct.get(row.key) || { qty: 0, value: 0 };
+          const deliveredQty = Math.max(0, Number(deliveredRaw.qty || 0));
+          const deliveredValue = Number(deliveredRaw.value || 0);
           return { ...row, bundleSize, bundles, balance, orderedQty: row.qty, orderedValue: row.value, deliveredQty, deliveredValue };
         })
         .sort((a, b) => b.orderedQty - a.orderedQty);
@@ -2067,6 +2132,33 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       count: rows.length,
       total: Number(rows.reduce((acc, row) => acc + Number(row.amount || 0), 0).toFixed(2)),
       top: rows[0] || null,
+      rows
+    };
+  }, [state.sales]);
+  const upcomingChequeSummary = useMemo(() => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const tomorrowKey = localDateKey(tomorrow);
+    const rows = [];
+    for (const sale of (state.sales || [])) {
+      for (const payment of salePayments(sale)) {
+        if (String(payment.method || "").toLowerCase() !== "cheque") continue;
+        const chequeDate = localDateKey(payment.chequeDate);
+        if (!chequeDate || chequeDate !== tomorrowKey) continue;
+        rows.push({
+          saleId: sale.id,
+          customer: sale.customerName || "Walk-in",
+          amount: Number(payment.amount || 0),
+          chequeNo: payment.chequeNo || "-",
+          bank: payment.chequeBank || "-",
+          rep: sale.cashier || "-"
+        });
+      }
+    }
+    return {
+      date: tomorrowKey,
+      count: rows.length,
+      total: Number(rows.reduce((acc, row) => acc + Number(row.amount || 0), 0).toFixed(2)),
       rows
     };
   }, [state.sales]);
@@ -2314,6 +2406,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
   const sortedLoadingA = useMemo(
     () => sortRows(loadingRowsByLorry["Lorry A"], "loadingA", "orderedQty", {
+      sku: (row) => row.sku || "",
       name: (row) => row.name,
       orderedQty: (row) => Number(row.orderedQty || 0),
       orderedValue: (row) => Number(row.orderedValue || 0),
@@ -2327,6 +2420,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
   const sortedLoadingB = useMemo(
     () => sortRows(loadingRowsByLorry["Lorry B"], "loadingB", "orderedQty", {
+      sku: (row) => row.sku || "",
       name: (row) => row.name,
       orderedQty: (row) => Number(row.orderedQty || 0),
       orderedValue: (row) => Number(row.orderedValue || 0),
@@ -2460,11 +2554,11 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         }
       }
       for (const line of (sale.lines || [])) {
-        const soldQty = Number(line.quantity || 0);
-        const undeliveredQty = Number(undeliveredByProduct.get(line.productId) || 0);
-        const deliveredQty = Math.max(0, soldQty - undeliveredQty);
-        if (deliveredQty <= 0) continue;
-        const unitPrice = Number(line.price || 0);
+        const lineState = effectiveSaleLineState(sale, line, {
+          returnedByProduct: saleReturnedQtyByProduct(sale, state.returns || []),
+          undeliveredByProduct
+        });
+        if (lineState.effectiveQty <= 0) continue;
         const key = line.productId || line.name;
         const current = map.get(key) || {
           key,
@@ -2473,8 +2567,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           qty: 0,
           value: 0
         };
-        current.qty += deliveredQty;
-        current.value += deliveredQty * unitPrice;
+        current.qty += lineState.effectiveQty;
+        current.value += lineState.effectiveRevenue;
         map.set(key, current);
       }
     }
@@ -2517,12 +2611,15 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       let deliveredQty = 0;
       let deliveredValue = 0;
       for (const line of (sale.lines || [])) {
-        const sold = Number(line.quantity || 0);
-        const undelivered = isConfirmed ? Math.max(0, Number(undeliveredByProduct.get(line.productId) || 0)) : 0;
-        const delivered = isConfirmed ? Math.max(0, sold - undelivered) : 0;
-        undeliveredQty += undelivered;
-        deliveredQty += delivered;
-        deliveredValue += delivered * Number(line.price || 0);
+        const lineState = isConfirmed
+          ? effectiveSaleLineState(sale, line, {
+            returnedByProduct: saleReturnedQtyByProduct(sale, state.returns || []),
+            undeliveredByProduct
+          })
+          : { undeliveredQty: 0, effectiveQty: 0, effectiveRevenue: 0 };
+        undeliveredQty += Number(lineState.undeliveredQty || 0);
+        deliveredQty += Number(lineState.effectiveQty || 0);
+        deliveredValue += Number(lineState.effectiveRevenue || 0);
       }
       return {
         id: sale.id,
@@ -2598,6 +2695,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   );
   const viewedSaleNetAmount = useMemo(
     () => saleNetTotal(viewedSale),
+    [viewedSale]
+  );
+  const viewedSalePaymentDisplay = useMemo(
+    () => saleDisplayPaymentInfo(viewedSale),
     [viewedSale]
   );
 
@@ -2714,16 +2815,39 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   };
 
   const printAdminSaleReceipt = (sale) => {
-      openSaleReceiptPrint({
-        sale,
-        customers: state.customers || [],
-        products: state.products || [],
-        returnByProduct: viewedSale && String(viewedSale.id) === String(sale.id) ? viewedSaleReturnByProduct : new Map(),
-        returnedAmountOverride: viewedSale && String(viewedSale.id) === String(sale.id) ? viewedSaleReturnedAmount : Number(sale?.returnedAmount || 0),
-        totalOverride: viewedSale && String(viewedSale.id) === String(sale.id) ? viewedSaleNetAmount : saleNetTotal(sale),
-        onPopupBlocked: () => setNotice("Allow popups to print receipt.")
-      });
-    };
+    const printSale = sale || viewedSale;
+    if (!printSale) return;
+    const returnByProduct = new Map();
+    for (const ret of (state.returns || [])) {
+      if (String(ret.saleId) !== String(printSale.id)) continue;
+      for (const line of (ret.lines || [])) {
+        const key = String(line.productId || "");
+        if (!key) continue;
+        const current = returnByProduct.get(key) || { qty: 0, amount: 0 };
+        current.qty += Number(line.quantity || 0);
+        current.amount += Number(line.returnAmount || 0);
+        returnByProduct.set(key, current);
+      }
+    }
+    const undeliveredByProduct = new Map();
+    for (const adjustment of (printSale.deliveryAdjustments || [])) {
+      for (const line of (adjustment.lines || [])) {
+        const key = String(line.productId || "");
+        if (!key) continue;
+        undeliveredByProduct.set(key, Number(undeliveredByProduct.get(key) || 0) + Number(line.quantity || 0));
+      }
+    }
+    openSaleReceiptPrint({
+      sale: printSale,
+      customers: state.customers || [],
+      products: state.products || [],
+      returnByProduct,
+      undeliveredByProduct,
+      returnedAmountOverride: Number(printSale?.returnedAmount || 0),
+      totalOverride: saleNetTotal(printSale),
+      onPopupBlocked: () => setNotice("Allow popups to print receipt.")
+    });
+  };
 
   const printLoadingBreakdown = ({ lorry, rows, summary }) => {
     const printWindow = window.open("", "_blank", "width=1100,height=900");
@@ -2770,7 +2894,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 <body>
   <div class="sheet">
     <div class="head">
-      <img src="../apps/web/public/invoice-pepsi.png" alt="Pepsi" />
+      <img src="/invoice-pepsi.png" alt="Pepsi" />
       <div>
         <h1>${escapeHtml(lorry)} Loading Breakdown</h1>
         <p>Pepsi Distributor POS • Date Range: ${escapeHtml(dateRangeLabel)}</p>
@@ -2781,6 +2905,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       <article><span>Ordered Value</span><strong>LKR ${formatLkrValue(summary?.orderedValue || 0)}</strong></article>
       <article><span>Delivered Qty</span><strong>${Number(summary?.deliveredQty || 0)}</strong></article>
       <article><span>Delivered Value</span><strong>LKR ${formatLkrValue(summary?.deliveredValue || 0)}</strong></article>
+      <article><span>Ordered Bundles</span><strong>${Number(summary?.orderedBundles || 0)}</strong></article>
+      <article><span>Ordered Singles</span><strong>${Number(summary?.orderedSingles || 0)}</strong></article>
+      <article><span>Delivered Bundles</span><strong>${Number(summary?.deliveredBundles || 0)}</strong></article>
+      <article><span>Delivered Singles</span><strong>${Number(summary?.deliveredSingles || 0)}</strong></article>
     </div>
     <table>
       <thead>
@@ -4071,6 +4199,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
           {activePage === "dashboard" ? (
             <div className="admin-mobile admin-dashboard">
+                {upcomingChequeSummary.count ? (
+                  <button type="button" className="admin-mobile-section dashboard-headline-banner cheque-headline-banner dashboard-headline-button" onClick={() => setShowChequeAlertDetails(true)}>
+                    <strong>Cheque Alert Tomorrow</strong>
+                    <span>
+                      {upcomingChequeSummary.count} cheque{upcomingChequeSummary.count === 1 ? "" : "s"} • LKR {formatLkrValue(upcomingChequeSummary.total)} • {upcomingChequeSummary.rows[0]?.customer || "-"} • #{upcomingChequeSummary.rows[0]?.saleId || "-"} • {upcomingChequeSummary.rows[0]?.bank || "-"}
+                    </span>
+                  </button>
+                ) : null}
                 <section className="admin-mobile-section dashboard-snapshot-panel">
                   <h2>Admin Snapshot</h2>
                   <div className="snapshot-layout">
@@ -4793,11 +4929,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           <div className="low-stock-modal-card receipt-preview-card" onClick={(e) => e.stopPropagation()}>
             <div className="low-stock-modal-head">
               <h3>Receipt #{viewedSale.id}</h3>
-              <button type="button" className="ghost" onClick={() => setViewSaleId("")}>Close</button>
+              <div className="receipt-preview-head-actions">
+                <button type="button" className="receipt-print-action" onClick={() => printAdminSaleReceipt(viewedSale)}>Print</button>
+                <button type="button" className="ghost" onClick={() => setViewSaleId("")}>Close</button>
+              </div>
             </div>
             <div className="receipt-preview">
               <h4>M.W.M.B CHANDRASEKARA - MATALE DISTRIBUTOR</h4>
-              <p>{new Date(viewedSale.createdAt).toLocaleString()} • {viewedSale.customerName} • {viewedSale.paymentType}</p>
+              <p>{new Date(viewedSale.createdAt).toLocaleString()} • {viewedSale.customerName} • {viewedSalePaymentDisplay.label}{viewedSalePaymentDisplay.detail ? ` (${viewedSalePaymentDisplay.detail})` : ""}</p>
               <div className="admin-table receipt-table">
                 <header>
                   <span>Item Code</span>
@@ -4812,6 +4951,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     const originalQty = Number(line.quantity || 0);
                     const soldAfterDelivery = Math.max(0, originalQty - notDeliveredQty);
                     const netQty = Math.max(0, soldAfterDelivery - Number(returned.qty || 0));
+                    const bundleSource = productInfoById.get(line.productId) || line;
+                    const bundleSize = getBundleSize(bundleSource);
+                    const bundles = bundleSize ? Math.floor(netQty / bundleSize) : 0;
+                    const singles = bundleSize ? netQty % bundleSize : netQty;
                     const grossRemaining = Number((Number(line.price || 0) * netQty).toFixed(2));
                     const remainingBillDiscountShare = Number(viewedSale.subTotal || 0) > 0
                       ? Number((Number(viewedSale.discountAmount || viewedSale.discount || 0) * (grossRemaining / Number(viewedSale.subTotal || 1))).toFixed(2))
@@ -4824,7 +4967,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                           {notDeliveredQty > 0 ? <small className="sales-return-note">Not Delivered {notDeliveredQty}</small> : null}
                           {Number(returned.qty || 0) > 0 ? <small className="sales-return-note">Returned {returned.qty}</small> : null}
                         </span>
-                        <span>{netQty}</span>
+                        <span>
+                          {netQty}
+                          {bundleSize > 0 ? <small className="sales-return-note">{bundles} Bundles {singles} Singles</small> : null}
+                        </span>
                         <span>{formatLkrValue(line.price || 0)}</span>
                         <span>
                           {Number(line.itemDiscount || 0) > 0 ? currency(line.itemDiscount) : "-"}
@@ -4844,7 +4990,6 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     {viewedSaleReturnedAmount > 0 ? <p className="form-hint return-adjust-text">Returns: - {currency(viewedSaleReturnedAmount)}</p> : null}
                     <p className="form-hint"><strong>Total: {currency(viewedSaleNetAmount || 0)}</strong></p>
                   </div>
-                  <button type="button" className="receipt-print-action" onClick={() => printAdminSaleReceipt(viewedSale)}>Print</button>
                 </div>
             </div>
           </div>
@@ -5024,6 +5169,40 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           </div>
         </div>
       ) : null}
+
+      {showChequeAlertDetails ? (
+        <div className="low-stock-modal" onClick={() => setShowChequeAlertDetails(false)}>
+          <div className="low-stock-modal-card cheque-alert-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Tomorrow Cheques</h3>
+              <button type="button" onClick={() => setShowChequeAlertDetails(false)}>Close</button>
+            </div>
+            <p className="form-hint">
+              {upcomingChequeSummary.count} cheque{upcomingChequeSummary.count === 1 ? "" : "s"} due on {upcomingChequeSummary.date} • Total LKR {formatLkrValue(upcomingChequeSummary.total)}
+            </p>
+            <div className="admin-table cheque-alert-table">
+              <header>
+                <span>Sale</span>
+                <span>Customer</span>
+                <span>Amount</span>
+                <span>Cheque No</span>
+                <span>Bank</span>
+                <span>Rep</span>
+              </header>
+              {upcomingChequeSummary.rows.map((row) => (
+                <article key={`cheque-alert-${row.saleId}-${row.chequeNo}-${row.customer}`}>
+                  <span>#{row.saleId}</span>
+                  <span>{row.customer}</span>
+                  <span>LKR {formatLkrValue(row.amount)}</span>
+                  <span>{row.chequeNo}</span>
+                  <span>{row.bank}</span>
+                  <span>{row.rep}</span>
+                </article>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 };
@@ -5129,7 +5308,7 @@ export const App = () => {
     const next = { "Lorry A": 0, "Lorry B": 0 };
     for (const sale of (state.sales || [])) {
       const lorryName = String(sale.lorry || "").trim();
-      if (!next[lorryName]) continue;
+      if (!(lorryName in next)) continue;
       if (sale.deliveryConfirmedAt) continue;
       const soldQty = (sale.lines || []).reduce((acc, line) => acc + Number(line.quantity || 0), 0);
       next[lorryName] += soldQty;
