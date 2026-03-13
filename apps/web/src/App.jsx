@@ -166,8 +166,95 @@ const returnLinePreview = (sale, line, quantity = 0) => {
     unitAmount: qty > 0 ? Number((returnAmount / qty).toFixed(2)) : 0
   };
 };
+const deliveryAdjustmentAmount = (sale, draft = {}) => {
+  if (!sale) return 0;
+  const qtyByProduct = new Map();
+  for (const adj of (sale.deliveryAdjustments || [])) {
+    for (const line of (adj.lines || [])) {
+      const key = String(line.productId || "").trim();
+      if (!key) continue;
+      qtyByProduct.set(key, Number(qtyByProduct.get(key) || 0) + Number(line.quantity || 0));
+    }
+  }
+  Object.entries(draft || {}).forEach(([productId, quantity]) => {
+    const key = String(productId || "").trim();
+    if (!key) return;
+    const qty = Number(quantity || 0);
+    if (!Number.isFinite(qty) || qty <= 0) return;
+    qtyByProduct.set(key, Number(qtyByProduct.get(key) || 0) + qty);
+  });
+
+  let total = 0;
+  for (const line of (sale.lines || [])) {
+    const key = String(line.productId || "").trim();
+    if (!key) continue;
+    const soldQty = Number(line.quantity || 0);
+    const undeliveredQty = Math.min(soldQty, Number(qtyByProduct.get(key) || 0));
+    if (undeliveredQty <= 0) continue;
+    total += Number(returnLinePreview(sale, line, undeliveredQty).returnAmount || 0);
+  }
+  return Number(total.toFixed(2));
+};
+const saleUndeliveredQtyByProduct = (sale) => {
+  const map = new Map();
+  for (const adjustment of (sale?.deliveryAdjustments || [])) {
+    for (const line of (adjustment.lines || [])) {
+      const key = String(line.productId || "").trim();
+      if (!key) continue;
+      map.set(key, Number(map.get(key) || 0) + Number(line.quantity || 0));
+    }
+  }
+  return map;
+};
+const saleReturnedQtyByProduct = (sale, returns = []) => {
+  const map = new Map();
+  for (const entry of (returns || [])) {
+    if (String(entry.saleId || "") !== String(sale?.id || "")) continue;
+    for (const line of (entry.lines || [])) {
+      const key = String(line.productId || "").trim();
+      if (!key) continue;
+      map.set(key, Number(map.get(key) || 0) + Number(line.quantity || 0));
+    }
+  }
+  return map;
+};
+const effectiveSaleLineState = (sale, line, { returnedByProduct = new Map(), undeliveredByProduct = new Map() } = {}) => {
+  const orderedQty = Number(line?.quantity || 0);
+  const undeliveredQty = Math.min(orderedQty, Number(undeliveredByProduct.get(String(line?.productId || "")) || 0));
+  const soldQty = Math.max(0, orderedQty - undeliveredQty);
+  const returnedQty = Math.min(soldQty, Number(returnedByProduct.get(String(line?.productId || "")) || 0));
+  const effectiveQty = Math.max(0, soldQty - returnedQty);
+  const unitPrice = Number(line?.price || 0);
+  const grossEffective = Number((unitPrice * effectiveQty).toFixed(2));
+  const billDiscountShare = Number(sale?.subTotal || 0) > 0
+    ? Number((Number(sale?.discountAmount || sale?.discount || 0) * (grossEffective / Number(sale?.subTotal || 1))).toFixed(2))
+    : 0;
+  const effectiveRevenue = Math.max(0, Number((grossEffective - billDiscountShare).toFixed(2)));
+  return {
+    orderedQty,
+    undeliveredQty,
+    soldQty,
+    returnedQty,
+    effectiveQty,
+    unitPrice,
+    billDiscountShare,
+    effectiveRevenue
+  };
+};
 const saleNetTotal = (sale) => Number(
-  Math.max(0, Number(sale?.netTotalAfterReturns ?? (Number(sale?.total || 0) - Number(sale?.returnedAmount || 0))))
+  Math.max(
+    0,
+    Number(
+      sale?.netTotalAfterReturns
+      ?? (Number(sale?.total || 0) - Number(sale?.returnedAmount || 0) - Number(sale?.undeliveredAmount || 0))
+    )
+  )
+    .toFixed(2)
+);
+const saleCustomerCreditApplied = (sale) => Number(
+  salePayments(sale)
+    .filter((payment) => String(payment.method || "").toLowerCase() === "customer_credit")
+    .reduce((acc, payment) => acc + Number(payment.amount || 0), 0)
     .toFixed(2)
 );
 
@@ -195,7 +282,7 @@ const openSaleReceiptPrint = ({
   const printedCustomerPhone = String(sale?.customerPhone || customer?.phone || "-").trim() || "-";
 
     const baseLines = Array.isArray(sale?.lines) ? sale.lines : [];
-    const lines = baseLines.slice(0, 12).map((line) => {
+    const lines = baseLines.map((line) => {
       const returned = returnByProduct?.get?.(String(line?.productId || "")) || { qty: 0, amount: 0 };
       const originalQty = Number(line?.quantity || 0);
       const qty = Math.max(0, originalQty - Number(returned.qty || 0));
@@ -228,13 +315,14 @@ const openSaleReceiptPrint = ({
         ? returnedAmountOverride
         : sale?.returnedAmount || 0
     );
-    const printedTotal = Number(
+  const printedTotal = Number(
       totalOverride !== null && totalOverride !== undefined
         ? totalOverride
         : saleNetTotal(sale)
     );
+  const customerCreditApplied = saleCustomerCreditApplied(sale);
 
-  const minRows = 8;
+  const minRows = lines.length > 8 ? 0 : 8;
   const rowsHtml = [...lines, ...Array.from({ length: Math.max(0, minRows - lines.length) }).map(() => null)]
     .map((line) => {
       if (!line) return "<tr><td>&nbsp;</td><td></td><td></td><td></td><td></td></tr>";
@@ -268,7 +356,7 @@ const openSaleReceiptPrint = ({
 <div class="header"><div class="logo-wrap"><img src="/pepsi-logo.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
 <div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div></div><div>Invoice No : <span class="dots">${escapeHtml(sale?.id || "-")}</span></div></div></div>
 <table><thead><tr><th>Item Code</th><th>Qty</th><th>Billing Price</th><th>Item Discount</th><th>Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
- <div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(printedTotal)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div>${returnedAmount > 0 ? `<div>RETURNS : - LKR ${toMoney(returnedAmount)}</div>` : ""}<div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div></div></div>
+ <div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(printedTotal)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div>${customerCreditApplied > 0 ? `<div>CUSTOMER CREDIT : - LKR ${toMoney(customerCreditApplied)}</div>` : ""}${returnedAmount > 0 ? `<div>RETURNS : - LKR ${toMoney(returnedAmount)}</div>` : ""}<div>${escapeHtml(String(sale?.paymentType || "").toUpperCase())} ${sale?.paymentType === "credit" && sale?.creditDueDate ? `(DUE ${escapeHtml(sale.creditDueDate)})` : ""}</div></div></div>
 <ul class="notes"><li>Return or exchange only with this receipt</li><li>Credit Payment for all goods shall be made No later than 14 days</li></ul>
 <div class="signatures"><div><div class="sign-line">.......................................</div><div>Customer Signature</div><div>Rubber Stamp</div></div><div><div class="sign-line">.......................................</div><div>P.S.R Signature</div></div></div>
 <div class="powered">Powered By J&amp;Co.</div></div></body></html>`;
@@ -358,6 +446,11 @@ const CashierView = ({
   setDiscountMode,
   discountValue,
   setDiscountValue,
+  selectedCustomerAvailableCredit,
+  customerCreditDraft,
+  setCustomerCreditDraft,
+  appliedCustomerCredit,
+  totalAfterCustomerCredit,
   lorryLoadMap,
   currentCartQty,
   cart,
@@ -415,7 +508,7 @@ const CashierView = ({
       const outstanding = Number(
         sale.outstandingAmount !== undefined
           ? sale.outstandingAmount
-          : (sale.paymentType === "credit" ? sale.total : 0)
+          : (sale.paymentType === "credit" ? saleNetTotal(sale) : 0)
       ) || 0;
       if (outstanding > 0) {
         map.set(key, (map.get(key) || 0) + outstanding);
@@ -438,7 +531,7 @@ const CashierView = ({
       if (!rep || saleRep !== rep) continue;
       if (String(sale.createdAt || "").slice(0, 10) !== today) continue;
       orders += 1;
-      revenue += Number(sale.total || 0);
+      revenue += saleNetTotal(sale);
     }
     return { orders, revenue: Number(revenue.toFixed(2)) };
   }, [cashier, state.sales]);
@@ -753,7 +846,7 @@ const CashierView = ({
       const rep = String(sale.cashier || "Unknown").trim() || "Unknown";
       const row = map.get(rep) || { rep, bills: 0, revenue: 0 };
       row.bills += 1;
-      row.revenue += Number(sale.total || 0);
+      row.revenue += saleNetTotal(sale);
       map.set(rep, row);
     }
     return [...map.values()].sort((a, b) => b.revenue - a.revenue);
@@ -761,12 +854,28 @@ const CashierView = ({
   const [editingSaleId, setEditingSaleId] = useState("");
   const [saleEditLines, setSaleEditLines] = useState([]);
   const [saleEditPaymentType, setSaleEditPaymentType] = useState(PAYMENT_TYPES[0]);
+  const [saleEditBillDiscount, setSaleEditBillDiscount] = useState("");
   const [saleEditError, setSaleEditError] = useState("");
   const [savingSaleEdit, setSavingSaleEdit] = useState(false);
+  const saleEditSubTotal = useMemo(
+    () => Number(saleEditLines.reduce((acc, line) => acc + (lineFinalPrice(line) * Number(line.quantity || 0)), 0).toFixed(2)),
+    [saleEditLines]
+  );
 
   const openSaleEdit = (sale) => {
+    const hasDeliveryProcessing = Boolean(sale?.deliveryConfirmedAt) || Boolean((sale?.deliveryAdjustments || []).length);
+    const hasReturns = (state.returns || []).some((ret) => String(ret.saleId) === String(sale?.id));
+    if (hasDeliveryProcessing) {
+      setNotice("This bill cannot be edited after delivery processing has started.");
+      return;
+    }
+    if (hasReturns) {
+      setNotice("This bill cannot be edited after returns have been submitted.");
+      return;
+    }
     setEditingSaleId(sale.id);
     setSaleEditPaymentType(String(sale.paymentType || PAYMENT_TYPES[0]));
+    setSaleEditBillDiscount(String(Number(sale.discountAmount ?? sale.discount ?? 0) || 0));
     setSaleEditLines((sale.lines || []).map((line) => ({
       productId: line.productId,
       name: line.name,
@@ -793,11 +902,17 @@ const CashierView = ({
           setSaleEditError("Keep at least one item in bill.");
           return;
         }
+        const billDiscount = Math.max(0, Number(saleEditBillDiscount || 0) || 0);
+        if (billDiscount > saleEditSubTotal) {
+          setSaleEditError(`Total bill discount cannot exceed subtotal (${currency(saleEditSubTotal)}).`);
+          return;
+        }
         setSavingSaleEdit(true);
         setSaleEditError("");
-      await patchSale(editingSaleId, { lines, paymentType: saleEditPaymentType });
+      await patchSale(editingSaleId, { lines, paymentType: saleEditPaymentType, discount: billDiscount });
         setEditingSaleId("");
         setSaleEditPaymentType(PAYMENT_TYPES[0]);
+        setSaleEditBillDiscount("");
         setSaleEditLines([]);
       } catch (error) {
         setSaleEditError(error.message);
@@ -827,8 +942,13 @@ const CashierView = ({
     try {
       const saleCashier = String(sale?.cashier || "").trim().toLowerCase();
       const actingRep = String(cashier || "").trim().toLowerCase();
+      const hasDeliveryProcessing = Boolean(sale?.deliveryConfirmedAt) || Boolean((sale?.deliveryAdjustments || []).length);
       if (!sale || !saleCashier || saleCashier !== actingRep) {
         setNotice("You can delete only your own bills.");
+        return;
+      }
+      if (hasDeliveryProcessing) {
+        setNotice("This bill cannot be deleted after delivery processing has started.");
         return;
       }
       const ok = await requestConfirm({
@@ -965,10 +1085,11 @@ const CashierView = ({
             
             </section>
             </div>
-             <div className="totals">
+            <div className="totals">
               <p>Subtotal: {currency(totals.subTotal)}</p>
               <p>Discount: {currency(totals.discountAmount)}</p>
-              <h3>Total: {currency(totals.total)}</h3>
+              {appliedCustomerCredit > 0 ? <p>Customer Credit: - {currency(appliedCustomerCredit)}</p> : null}
+              <h3>Total: {currency(totalAfterCustomerCredit)}</h3>
             </div>
           </section>
 
@@ -997,6 +1118,26 @@ const CashierView = ({
                 </div>
               ) : null}
               {customerName.trim() ? <p className="form-hint outstanding-text">Outstanding: {currency(selectedCustomerOutstanding)}</p> : null}
+              {customerName.trim() && selectedCustomerAvailableCredit > 0 ? (
+                <>
+                  <p className="form-hint">Available Credit: {currency(selectedCustomerAvailableCredit)}</p>
+                  <label className="form-hint">Apply Customer Credit</label>
+                  <div className="checkout-inline-action">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={customerCreditDraft}
+                      onChange={(e) => setCustomerCreditDraft(e.target.value)}
+                      placeholder="Customer credit amount"
+                    />
+                    <button type="button" className="ghost" onClick={() => setCustomerCreditDraft(String(selectedCustomerAvailableCredit))}>
+                      Use Full
+                    </button>
+                  </div>
+                  {appliedCustomerCredit > 0 ? <p className="form-hint">Credit applied: {currency(appliedCustomerCredit)} • Payable now: {currency(totalAfterCustomerCredit)}</p> : null}
+                </>
+              ) : null}
               {selectedSavedCustomer ? (
                 <>
                   <label className="form-hint">Customer Tel</label>
@@ -1114,7 +1255,7 @@ const CashierView = ({
                 <option value="">{returnCustomerName.trim() ? "Select bill (Sale ID)" : "Select customer first"}</option>
                 {returnSalesForCustomer.map((sale) => (
                   <option key={sale.id} value={sale.id}>
-                    #{sale.id} • {new Date(sale.createdAt).toLocaleDateString()} • {currency(sale.total)}
+                    #{sale.id} • {new Date(sale.createdAt).toLocaleDateString()} • {currency(saleNetTotal(sale))}
                   </option>
                 ))}
               </select>
@@ -1154,10 +1295,18 @@ const CashierView = ({
                     {(returnSale.lines || []).map((line) => {
                       const sold = Number(line.quantity || 0);
                       const returned = Number(returnedQtyByProduct.get(line.productId) || 0);
+                      const alreadyNotDelivered = Number(
+                        (returnSale.deliveryAdjustments || []).reduce((acc, adjustment) => (
+                          acc + (adjustment.lines || [])
+                            .filter((item) => String(item.productId) === String(line.productId))
+                            .reduce((lineAcc, item) => lineAcc + Number(item.quantity || 0), 0)
+                        ), 0)
+                      );
+                      const soldEffective = Math.max(0, sold - alreadyNotDelivered);
                       const draft = returnLinesDraft[line.productId] || { quantity: "", condition: "good" };
                       const draftQty = Number(draft.quantity || 0);
-                      const remainingBeforeDraft = Math.max(0, sold - returned);
-                      const remainingLive = Math.max(0, sold - returned - (Number.isFinite(draftQty) ? draftQty : 0));
+                      const remainingBeforeDraft = Math.max(0, sold - returned - alreadyNotDelivered);
+                      const remainingLive = Math.max(0, sold - returned - alreadyNotDelivered - (Number.isFinite(draftQty) ? draftQty : 0));
                       const preview = returnLinePreview(returnSale, line, Number.isFinite(draftQty) ? draftQty : 0);
                       const lineHasItemDiscount = Number(lineItemDiscount(line) || 0) > 0;
                       const lineHasBillDiscount = Number(returnSale.discountAmount || returnSale.discount || 0) > 0;
@@ -1165,7 +1314,7 @@ const CashierView = ({
                         <article key={line.productId} className="list-row return-line-card">
                             <div className="return-line-main">
                               <strong>{line.name}</strong>
-                              <p>Sold {sold} • Returned {returned} • Remaining {remainingLive}</p>
+                              <p>Ordered {sold} • Not Delivered {alreadyNotDelivered} • Sold {soldEffective} • Returned {returned} • Remaining {remainingLive}</p>
                               <p>Sold unit value {currency(line.price || 0)}</p>
                               {draftQty > 0 ? (
                                 <p className="return-line-discount-note">
@@ -1220,11 +1369,24 @@ const CashierView = ({
                     <p className="rep-sale-meta">Lorry: {sale.lorry || "-"}</p>
                   </div>
                   <div className="rep-sale-side">
-                    <strong className="rep-sale-total">{currency(sale.total)}</strong>
+                    <strong className="rep-sale-total">{currency(saleNetTotal(sale))}</strong>
                     <div className="sales-row-actions">
-                      <button type="button" onClick={() => openSaleEdit(sale)}>Edit</button>
+                      <button
+                        type="button"
+                        onClick={() => openSaleEdit(sale)}
+                        disabled={Boolean(sale.deliveryConfirmedAt) || Boolean((sale.deliveryAdjustments || []).length) || (state.returns || []).some((ret) => String(ret.saleId) === String(sale.id))}
+                      >
+                        Edit
+                      </button>
                       {String(sale.cashier || "").trim().toLowerCase() === String(cashier || "").trim().toLowerCase() ? (
-                        <button type="button" className="row-danger" onClick={() => deleteRepSale(sale)}>Delete</button>
+                        <button
+                          type="button"
+                          className="row-danger"
+                          onClick={() => deleteRepSale(sale)}
+                          disabled={Boolean(sale.deliveryConfirmedAt) || Boolean((sale.deliveryAdjustments || []).length)}
+                        >
+                          Delete
+                        </button>
                       ) : null}
                     </div>
                   </div>
@@ -1240,6 +1402,18 @@ const CashierView = ({
                     {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
                   </select>
                 </label>
+                <label className="rep-sale-field rep-sale-edit-payment">
+                  <span>Total Bill Discount (LKR)</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={saleEditBillDiscount}
+                    onChange={(e) => setSaleEditBillDiscount(e.target.value)}
+                    placeholder="0.00"
+                  />
+                </label>
+                <p className="form-hint">Editable subtotal: {currency(saleEditSubTotal)}</p>
               {saleEditLines.map((line) => (
                 <div key={line.productId} className="rep-sale-edit-row">
                   <div className="rep-sale-edit-name">{line.name}</div>
@@ -1292,7 +1466,7 @@ const CashierView = ({
                   {saleEditError ? <p className="form-hint">{saleEditError}</p> : null}
                   <div className="rep-sale-edit-actions">
                     <button type="button" onClick={saveSaleEdit} disabled={savingSaleEdit}>{savingSaleEdit ? "Saving..." : "Save Edit"}</button>
-                  <button type="button" className="ghost" onClick={() => { setEditingSaleId(""); setSaleEditPaymentType(PAYMENT_TYPES[0]); setSaleEditLines([]); setSaleEditError(""); }}>Cancel</button>
+                  <button type="button" className="ghost" onClick={() => { setEditingSaleId(""); setSaleEditPaymentType(PAYMENT_TYPES[0]); setSaleEditBillDiscount(""); setSaleEditLines([]); setSaleEditError(""); }}>Cancel</button>
                   </div>
                 </div>
             ) : null}
@@ -1307,7 +1481,7 @@ const CashierView = ({
                     <p>{new Date(sale.createdAt).toLocaleString()}</p>
                     <p>{sale.customerName} • {sale.paymentType} • {sale.lorry || "-"}</p>
                   </div>
-                  <strong>{currency(sale.total)}</strong>
+                  <strong>{currency(saleNetTotal(sale))}</strong>
                 </article>
               ))}
             </div>
@@ -1510,6 +1684,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [deliveryDateTo, setDeliveryDateTo] = useState("");
   const [deliveryReportDateFrom, setDeliveryReportDateFrom] = useState("");
   const [deliveryReportDateTo, setDeliveryReportDateTo] = useState("");
+  const [dashboardProfitDateFrom, setDashboardProfitDateFrom] = useState("");
+  const [dashboardProfitDateTo, setDashboardProfitDateTo] = useState("");
   const [reportDeliveryLorry, setReportDeliveryLorry] = useState("all");
   const [reportDeliveryDateFrom, setReportDeliveryDateFrom] = useState("");
   const [reportDeliveryDateTo, setReportDeliveryDateTo] = useState("");
@@ -1617,7 +1793,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       const short = cursor.toLocaleDateString(undefined, { month: "short", day: "numeric" });
       const daySales = state.sales.filter((sale) => String(sale.createdAt || "").slice(0, 10) === key);
       const count = daySales.length;
-      const revenue = daySales.reduce((acc, sale) => acc + Number(sale.total || 0), 0);
+      const revenue = daySales.reduce((acc, sale) => acc + saleNetTotal(sale), 0);
       base.push({ key, short, count, revenue: Number(revenue.toFixed(2)) });
       cursor.setDate(cursor.getDate() + 1);
       guard += 1;
@@ -1674,18 +1850,21 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       : itemReportSales.filter((sale) => sale.lorry === itemReportLorry);
     const map = new Map();
     for (const sale of salesSource) {
+      const returnedByProduct = saleReturnedQtyByProduct(sale, state.returns || []);
+      const undeliveredByProduct = saleUndeliveredQtyByProduct(sale);
       for (const line of (sale.lines || [])) {
         const key = line.productId || line.name;
         const info = productInfoById.get(line.productId) || { name: line.name || "Unknown Item", sku: "-", size: "", category: "" };
         const row = map.get(key) || { key, name: info.name, sku: info.sku, size: info.size || "", category: info.category || "", qty: 0, bills: 0, revenue: 0 };
-        row.qty += Number(line.quantity || 0);
-        row.revenue += Number(line.quantity || 0) * Number(line.price || 0);
+        const lineState = effectiveSaleLineState(sale, line, { returnedByProduct, undeliveredByProduct });
+        row.qty += lineState.effectiveQty;
+        row.revenue += lineState.effectiveRevenue;
         row.bills += 1;
         map.set(key, row);
       }
     }
     return [...map.values()].sort((a, b) => b.qty - a.qty);
-  }, [itemReportLorry, itemReportSales, productInfoById]);
+  }, [itemReportLorry, itemReportSales, productInfoById, state.returns]);
 
   const loadingRowsByLorry = useMemo(() => {
     const buildRows = (lorryName) => {
@@ -1718,9 +1897,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         if (!inDateRange(sale.createdAt, loadingDateFrom, loadingDateTo)) continue;
         if (sale.lorry !== lorryName) continue;
         if (!sale.deliveryConfirmedAt) continue;
+        const returnedByProduct = saleReturnedQtyByProduct(sale, state.returns || []);
+        const undeliveredByProduct = saleUndeliveredQtyByProduct(sale);
         for (const line of (sale.lines || [])) {
           const lineKey = line.productId || line.name;
-          deliveredByProduct.set(lineKey, (deliveredByProduct.get(lineKey) || 0) + Number(line.quantity || 0));
+          const lineState = effectiveSaleLineState(sale, line, { returnedByProduct, undeliveredByProduct });
+          deliveredByProduct.set(lineKey, (deliveredByProduct.get(lineKey) || 0) + lineState.effectiveQty);
         }
       }
       return [...map.values()]
@@ -1730,7 +1912,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           const balance = bundleSize ? row.qty % bundleSize : row.qty;
           const deliveredRaw = Number(deliveredByProduct.get(row.key) || 0);
           const returned = Number(returnedByProduct.get(row.key) || 0);
-          const deliveredQty = Math.max(0, deliveredRaw - returned);
+          const deliveredQty = Math.max(0, deliveredRaw);
           const deliveredValue = row.qty > 0 ? (row.value * (Math.min(deliveredQty, row.qty) / row.qty)) : 0;
           return { ...row, bundleSize, bundles, balance, orderedQty: row.qty, orderedValue: row.value, deliveredQty, deliveredValue };
         })
@@ -1761,7 +1943,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       const key = sale.customerName || "Walk-in";
       const current = map.get(key) || { name: key, orders: 0, spent: 0, lastAt: "" };
       current.orders += 1;
-      current.spent += Number(sale.total || 0);
+      current.spent += saleNetTotal(sale);
       if (!current.lastAt || new Date(sale.createdAt).getTime() > new Date(current.lastAt).getTime()) {
         current.lastAt = sale.createdAt;
       }
@@ -1770,26 +1952,43 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     return [...map.values()].sort((a, b) => b.spent - a.spent);
   }, [reportSales]);
 
+  const customerCreditMap = useMemo(() => {
+    const map = new Map();
+    for (const entry of (state.customerCredits || [])) {
+      const key = String(entry.customerName || "").trim();
+      if (!key) continue;
+      const remainingAmount = Number(entry.remainingAmount ?? entry.amount ?? 0);
+      if (remainingAmount <= 0) continue;
+      map.set(key, Number(map.get(key) || 0) + remainingAmount);
+    }
+    return map;
+  }, [state.customerCredits]);
+
   const customerRows = useMemo(() => {
     const map = new Map();
     for (const sale of state.sales) {
       const key = sale.customerName || "Walk-in";
-      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, phone: "", address: "" };
+      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, availableCredit: 0, phone: "", address: "" };
       existing.orders += 1;
-      existing.spent += Number(sale.total || 0);
+      existing.spent += saleNetTotal(sale);
       existing.outstanding += Number(
         sale.outstandingAmount !== undefined
           ? sale.outstandingAmount
-          : (sale.paymentType === "credit" ? sale.total : 0)
+          : (sale.paymentType === "credit" ? saleNetTotal(sale) : 0)
       ) || 0;
       map.set(key, existing);
     }
     for (const customer of (state.customers || [])) {
-      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0 };
+      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, availableCredit: 0 };
       map.set(customer.name, { ...existing, ...customer });
     }
+    for (const [name, credit] of customerCreditMap.entries()) {
+      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, availableCredit: 0 };
+      existing.availableCredit = Number(credit || 0);
+      map.set(name, existing);
+    }
     return [...map.values()].sort((a, b) => b.spent - a.spent);
-  }, [state.sales, state.customers]);
+  }, [state.sales, state.customers, customerCreditMap]);
   const filteredCustomerRows = useMemo(() => {
     const term = customerPanelSearch.trim().toLowerCase();
     if (!term) return customerRows;
@@ -1805,7 +2004,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       phone: (row) => row.phone || "",
       orders: (row) => Number(row.orders || 0),
       spent: (row) => Number(row.spent || 0),
-      outstanding: (row) => Number(row.outstanding || 0)
+      outstanding: (row) => Number(row.outstanding || 0),
+      availableCredit: (row) => Number(row.availableCredit || 0)
     }),
     [filteredCustomerRows, tableSort]
   );
@@ -1815,6 +2015,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     let totalOrders = 0;
     let totalSpent = 0;
     let totalOutstanding = 0;
+    let totalAvailableCredit = 0;
     let activeCustomers = 0;
     let customersWithOutstanding = 0;
     let topCustomer = null;
@@ -1822,9 +2023,11 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       const orders = Number(row.orders || 0);
       const spent = Number(row.spent || 0);
       const outstanding = Number(row.outstanding || 0);
+      const availableCredit = Number(row.availableCredit || 0);
       totalOrders += orders;
       totalSpent += spent;
       totalOutstanding += outstanding;
+      totalAvailableCredit += availableCredit;
       if (orders > 0) activeCustomers += 1;
       if (outstanding > 0) customersWithOutstanding += 1;
       if (!topCustomer || spent > Number(topCustomer.spent || 0)) topCustomer = row;
@@ -1836,6 +2039,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       totalOrders,
       totalSpent: Number(totalSpent.toFixed(2)),
       totalOutstanding: Number(totalOutstanding.toFixed(2)),
+      totalAvailableCredit: Number(totalAvailableCredit.toFixed(2)),
       averageOrderValue: totalOrders > 0 ? Number((totalSpent / totalOrders).toFixed(2)) : 0,
       topCustomerName: topCustomer?.name || "-",
       topCustomerSpent: Number(topCustomer?.spent || 0)
@@ -1868,41 +2072,33 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   }, [state.sales]);
   const dashboardProfitSummary = useMemo(() => {
     const productsById = new Map((state.products || []).map((product) => [String(product.id), product]));
-    const returnedQtyBySaleProduct = new Map();
-    for (const entry of (state.returns || [])) {
-      const saleId = String(entry.saleId || "");
-      for (const line of (entry.lines || [])) {
-        const key = `${saleId}:${String(line.productId || "")}`;
-        returnedQtyBySaleProduct.set(
-          key,
-          Number(returnedQtyBySaleProduct.get(key) || 0) + Number(line.quantity || 0)
-        );
-      }
-    }
-
+    const scopedSales = (state.sales || []).filter((sale) => inDateRange(sale.createdAt, dashboardProfitDateFrom, dashboardProfitDateTo));
     let netRevenue = 0;
     let invoiceCost = 0;
 
-    for (const sale of (state.sales || [])) {
+    for (const sale of scopedSales) {
       netRevenue += saleNetTotal(sale);
+      const returnedByProduct = saleReturnedQtyByProduct(sale, state.returns || []);
+      const undeliveredByProduct = saleUndeliveredQtyByProduct(sale);
       for (const line of (sale.lines || [])) {
-        const key = `${String(sale.id)}:${String(line.productId || "")}`;
-        const returnedQty = Number(returnedQtyBySaleProduct.get(key) || 0);
-        const netQty = Math.max(0, Number(line.quantity || 0) - returnedQty);
+        const lineState = effectiveSaleLineState(sale, line, { returnedByProduct, undeliveredByProduct });
         const product = productsById.get(String(line.productId || ""));
         const unitInvoice = Number(product?.invoicePrice ?? 0);
-        invoiceCost += netQty * unitInvoice;
+        invoiceCost += lineState.effectiveQty * unitInvoice;
       }
     }
 
     const profit = Number((netRevenue - invoiceCost).toFixed(2));
     return {
+      from: dashboardProfitDateFrom,
+      to: dashboardProfitDateTo,
+      filteredSalesCount: scopedSales.length,
       revenue: Number(netRevenue.toFixed(2)),
       cost: Number(invoiceCost.toFixed(2)),
       profit,
       margin: netRevenue > 0 ? Number(((profit / netRevenue) * 100).toFixed(1)) : 0
     };
-  }, [state.products, state.returns, state.sales]);
+  }, [dashboardProfitDateFrom, dashboardProfitDateTo, state.products, state.returns, state.sales]);
   const customerDetailData = useMemo(() => {
     const key = String(customerDetailName || "").trim().toLowerCase();
     if (!key) return null;
@@ -1912,7 +2108,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       .filter((sale) => String(sale.customerName || "").trim().toLowerCase() === key)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     const totalBills = sales.length;
-    const totalQty = sales.reduce((acc, sale) => acc + (sale.lines || []).reduce((lineAcc, line) => lineAcc + Number(line.quantity || 0), 0), 0);
+    const totalQty = sales.reduce((acc, sale) => {
+      const returnedByProduct = saleReturnedQtyByProduct(sale, state.returns || []);
+      const undeliveredByProduct = saleUndeliveredQtyByProduct(sale);
+      return acc + (sale.lines || []).reduce((lineAcc, line) => {
+        const lineState = effectiveSaleLineState(sale, line, { returnedByProduct, undeliveredByProduct });
+        return lineAcc + lineState.effectiveQty;
+      }, 0);
+    }, 0);
     const averageBillValue = totalBills ? Number((Number(row.spent || 0) / totalBills).toFixed(2)) : 0;
     const saleIds = new Set(sales.map((sale) => String(sale.id)));
     const returnSummary = (state.returns || []).reduce((acc, entry) => {
@@ -1931,6 +2134,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       returnedValue: Number(returnSummary.value.toFixed(2)),
       averageBillValue,
       lastSaleAt: sales[0]?.createdAt || "",
+      availableCredit: Number(row.availableCredit || 0),
       recentSales: sales.slice(0, 4)
     };
   }, [customerDetailName, customerRows, state.sales, state.returns]);
@@ -2025,7 +2229,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       const key = sale.cashier || "Unknown";
       const existing = map.get(key) || { name: key, orders: 0, revenue: 0, role: "", phone: "" };
       existing.orders += 1;
-      existing.revenue += Number(sale.total || 0);
+      existing.revenue += saleNetTotal(sale);
       map.set(key, existing);
     }
     for (const member of (state.staff || [])) {
@@ -2157,14 +2361,45 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       latestChequeBank: latestCheque?.chequeBank || "-"
     };
   }, [reportSales]);
+  const repOutstandingRows = useMemo(() => {
+    const map = new Map();
+    for (const sale of reportSales) {
+      const outstanding = Number(sale.outstandingAmount || 0);
+      if (outstanding <= 0) continue;
+      const rep = String(sale.cashier || "-").trim() || "-";
+      const row = map.get(rep) || { rep, bills: 0, customers: new Set(), outstanding: 0 };
+      row.bills += 1;
+      row.outstanding += outstanding;
+      row.customers.add(String(sale.customerName || "Walk-in").trim() || "Walk-in");
+      map.set(rep, row);
+    }
+    return [...map.values()]
+      .map((row) => ({
+        rep: row.rep,
+        bills: row.bills,
+        customers: row.customers.size,
+        outstanding: Number(row.outstanding.toFixed(2))
+      }))
+      .sort((a, b) => b.outstanding - a.outstanding);
+  }, [reportSales]);
+  const repOutstandingSummary = useMemo(() => ({
+    reps: repOutstandingRows.length,
+    bills: repOutstandingRows.reduce((acc, row) => acc + Number(row.bills || 0), 0),
+    customers: repOutstandingRows.reduce((acc, row) => acc + Number(row.customers || 0), 0),
+    outstanding: Number(repOutstandingRows.reduce((acc, row) => acc + Number(row.outstanding || 0), 0).toFixed(2))
+  }), [repOutstandingRows]);
 
   const loadingSummaryA = useMemo(() => {
     const rows = loadingRowsByLorry["Lorry A"] || [];
     return {
       orderedQty: rows.reduce((acc, row) => acc + Number(row.orderedQty || 0), 0),
       orderedValue: rows.reduce((acc, row) => acc + Number(row.orderedValue || 0), 0),
+      orderedBundles: rows.reduce((acc, row) => acc + Number(row.bundles || 0), 0),
+      orderedSingles: rows.reduce((acc, row) => acc + Number(row.balance || 0), 0),
       deliveredQty: rows.reduce((acc, row) => acc + Number(row.deliveredQty || 0), 0),
-      deliveredValue: rows.reduce((acc, row) => acc + Number(row.deliveredValue || 0), 0)
+      deliveredValue: rows.reduce((acc, row) => acc + Number(row.deliveredValue || 0), 0),
+      deliveredBundles: rows.reduce((acc, row) => acc + Number(row.bundleSize ? Math.floor(Number(row.deliveredQty || 0) / row.bundleSize) : 0), 0),
+      deliveredSingles: rows.reduce((acc, row) => acc + Number(row.bundleSize ? Number(row.deliveredQty || 0) % row.bundleSize : Number(row.deliveredQty || 0)), 0)
     };
   }, [loadingRowsByLorry]);
 
@@ -2173,8 +2408,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     return {
       orderedQty: rows.reduce((acc, row) => acc + Number(row.orderedQty || 0), 0),
       orderedValue: rows.reduce((acc, row) => acc + Number(row.orderedValue || 0), 0),
+      orderedBundles: rows.reduce((acc, row) => acc + Number(row.bundles || 0), 0),
+      orderedSingles: rows.reduce((acc, row) => acc + Number(row.balance || 0), 0),
       deliveredQty: rows.reduce((acc, row) => acc + Number(row.deliveredQty || 0), 0),
-      deliveredValue: rows.reduce((acc, row) => acc + Number(row.deliveredValue || 0), 0)
+      deliveredValue: rows.reduce((acc, row) => acc + Number(row.deliveredValue || 0), 0),
+      deliveredBundles: rows.reduce((acc, row) => acc + Number(row.bundleSize ? Math.floor(Number(row.deliveredQty || 0) / row.bundleSize) : 0), 0),
+      deliveredSingles: rows.reduce((acc, row) => acc + Number(row.bundleSize ? Number(row.deliveredQty || 0) % row.bundleSize : Number(row.deliveredQty || 0)), 0)
     };
   }, [loadingRowsByLorry]);
 
@@ -2194,7 +2433,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           when: new Date(sale.createdAt).toLocaleString(),
           rep: sale.cashier || "-",
           lorry: sale.lorry || "-",
-          total: Number(sale.total || 0),
+          total: saleNetTotal(sale),
           soldQty,
           undeliveredQty,
           confirmed: Boolean(sale.deliveryConfirmedAt)
@@ -2252,7 +2491,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       (acc, sale) => acc + (sale.lines || []).reduce((lineAcc, line) => lineAcc + Number(line.quantity || 0), 0),
       0
     ),
-    value: Number(deliveryReportSales.reduce((acc, sale) => acc + Number(sale.total || 0), 0).toFixed(2))
+    value: Number(deliveryReportSales.reduce((acc, sale) => acc + saleNetTotal(sale), 0).toFixed(2))
   }), [deliveryReportSales]);
 
   const reportDeliverySales = useMemo(
@@ -2341,6 +2580,18 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     }
     return map;
   }, [state.returns, viewedSale]);
+  const viewedSaleUndeliveredByProduct = useMemo(() => {
+    const map = new Map();
+    if (!viewedSale) return map;
+    for (const adjustment of (viewedSale.deliveryAdjustments || [])) {
+      for (const line of (adjustment.lines || [])) {
+        const key = String(line.productId || "");
+        if (!key) continue;
+        map.set(key, Number(map.get(key) || 0) + Number(line.quantity || 0));
+      }
+    }
+    return map;
+  }, [viewedSale]);
   const viewedSaleReturnedAmount = useMemo(
     () => Number((viewedSale?.returnedAmount || 0).toFixed(2)),
     [viewedSale]
@@ -2374,16 +2625,34 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     () => Number((deliveryDraftCash + deliveryDraftCheque).toFixed(2)),
     [deliveryDraftCash, deliveryDraftCheque]
   );
+  const deliveryUndeliveredAmount = useMemo(
+    () => deliveryAdjustmentAmount(deliverySale),
+    [deliverySale]
+  );
+  const deliveryUndeliveredAmountWithDraft = useMemo(
+    () => deliveryAdjustmentAmount(deliverySale, deliveryDraft),
+    [deliverySale, deliveryDraft]
+  );
   const deliveryRemaining = useMemo(
-    () => Math.max(0, Number((Number(deliverySale?.total || 0) - deliveryPaidSoFar).toFixed(2))),
-    [deliverySale?.total, deliveryPaidSoFar]
+    () => Math.max(0, Number((Number(deliverySale?.total || 0) - Number(deliverySale?.returnedAmount || 0) - deliveryUndeliveredAmount - deliveryPaidSoFar).toFixed(2))),
+    [deliverySale?.total, deliverySale?.returnedAmount, deliveryUndeliveredAmount, deliveryPaidSoFar]
   );
   const deliveryRemainingAfterDraft = useMemo(
-    () => Math.max(0, Number((deliveryRemaining - deliveryDraftSettlement).toFixed(2))),
-    [deliveryRemaining, deliveryDraftSettlement]
+    () => Math.max(0, Number((Number(deliverySale?.total || 0) - Number(deliverySale?.returnedAmount || 0) - deliveryUndeliveredAmountWithDraft - deliveryPaidSoFar - deliveryDraftSettlement).toFixed(2))),
+    [deliverySale?.total, deliverySale?.returnedAmount, deliveryUndeliveredAmountWithDraft, deliveryPaidSoFar, deliveryDraftSettlement]
   );
 
   const openAdminSaleEdit = (sale) => {
+    const hasDeliveryProcessing = Boolean(sale?.deliveryConfirmedAt) || Boolean((sale?.deliveryAdjustments || []).length);
+    const hasReturns = (state.returns || []).some((ret) => String(ret.saleId) === String(sale?.id));
+    if (hasDeliveryProcessing) {
+      setNotice("This bill cannot be edited after delivery processing has started.");
+      return;
+    }
+    if (hasReturns) {
+      setNotice("This bill cannot be edited after returns have been submitted.");
+      return;
+    }
     setEditingAdminSaleId(sale.id);
     setAdminSaleEditLines((sale.lines || []).map((line) => ({
       productId: line.productId,
@@ -2417,6 +2686,11 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
   const deleteAdminSale = async (sale) => {
     try {
+      const hasDeliveryProcessing = Boolean(sale?.deliveryConfirmedAt) || Boolean((sale?.deliveryAdjustments || []).length);
+      if (hasDeliveryProcessing) {
+        setNotice("This bill cannot be deleted after delivery processing has started.");
+        return;
+      }
       const ok = await requestConfirm({
         title: "Delete Sale",
         message: `Are you sure want to delete sale #${sale.id}? This will restore stock and remove linked returns.`,
@@ -2450,6 +2724,91 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         onPopupBlocked: () => setNotice("Allow popups to print receipt.")
       });
     };
+
+  const printLoadingBreakdown = ({ lorry, rows, summary }) => {
+    const printWindow = window.open("", "_blank", "width=1100,height=900");
+    if (!printWindow) {
+      setNotice("Allow popups to print loading breakdown.");
+      return;
+    }
+    const dateRangeLabel = `${loadingDateFrom || "-"} to ${loadingDateTo || "-"}`;
+    const rowsHtml = (rows || []).length ? rows.map((row) => `
+      <tr>
+        <td>${escapeHtml(String(row.sku || "-"))}</td>
+        <td>${Number(row.orderedQty || 0)}</td>
+        <td>${formatLkrValue(row.orderedValue || 0)}</td>
+        <td>${Number(row.bundles || 0)}</td>
+        <td>${Number(row.balance || 0)}</td>
+        <td>${Number(row.deliveredQty || 0)}</td>
+        <td>${formatLkrValue(row.deliveredValue || 0)}</td>
+      </tr>
+    `).join("") : `<tr><td colspan="7">No loading records for ${escapeHtml(lorry)} in selected range.</td></tr>`;
+    const printHtml = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(lorry)} Loading Breakdown</title>
+  <style>
+    @page { size: A4 portrait; margin: 10mm; }
+    body { margin: 0; background: #fff; font-family: "Segoe UI", Arial, sans-serif; color: #122640; }
+    .sheet { width: 100%; max-width: 190mm; margin: 0 auto; padding: 4mm; }
+    .head { display: grid; grid-template-columns: 82px 1fr; gap: 14px; align-items: center; border: 1px solid #cdd9e8; border-radius: 18px; padding: 14px 16px; background: linear-gradient(135deg, #fbfdff 0%, #eef4fc 46%, #e2ecfa 100%); }
+    .head img { width: 74px; height: 74px; object-fit: contain; }
+    .head h1 { margin: 0; font-size: 24px; line-height: 1.05; }
+    .head p { margin: 6px 0 0; color: #4e647d; font-size: 13px; }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+    .kpis article { border: 1px solid #d2ddea; border-radius: 14px; padding: 10px 12px; background: #f7fbff; }
+    .kpis span { display: block; color: #536980; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .kpis strong { display: block; margin-top: 5px; font-size: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border: 1px solid #afbdd0; padding: 8px 9px; font-size: 13px; }
+    th { background: #e5edf8; text-transform: uppercase; font-size: 12px; letter-spacing: .04em; }
+    th:nth-child(n+2), td:nth-child(n+2) { text-align: center; }
+    .footer { margin-top: 18px; display: flex; justify-content: space-between; gap: 16px; color: #5b6f86; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="head">
+      <img src="../apps/web/public/invoice-pepsi.png" alt="Pepsi" />
+      <div>
+        <h1>${escapeHtml(lorry)} Loading Breakdown</h1>
+        <p>Pepsi Distributor POS • Date Range: ${escapeHtml(dateRangeLabel)}</p>
+      </div>
+    </div>
+    <div class="kpis">
+      <article><span>Ordered Qty</span><strong>${Number(summary?.orderedQty || 0)}</strong></article>
+      <article><span>Ordered Value</span><strong>LKR ${formatLkrValue(summary?.orderedValue || 0)}</strong></article>
+      <article><span>Delivered Qty</span><strong>${Number(summary?.deliveredQty || 0)}</strong></article>
+      <article><span>Delivered Value</span><strong>LKR ${formatLkrValue(summary?.deliveredValue || 0)}</strong></article>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>SKU</th>
+          <th>Ord Qty</th>
+          <th>Ord Value (LKR)</th>
+          <th>Bundles</th>
+          <th>Singles</th>
+          <th>Del Qty</th>
+          <th>Del Value (LKR)</th>
+        </tr>
+      </thead>
+      <tbody>${rowsHtml}</tbody>
+    </table>
+    <div class="footer">
+      <div>Generated on ${escapeHtml(new Date().toLocaleString())}</div>
+      <div>J&amp;Co. Software Solutions</div>
+    </div>
+  </div>
+</body>
+</html>`;
+    printWindow.document.open();
+    printWindow.document.write(printHtml);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => printWindow.print(), 250);
+  };
 
   const openDeliveryModal = (sale) => {
     setDeliverySaleId(String(sale.id));
@@ -2488,7 +2847,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         setDeliveryError("Cheque amount must be 0 or more.");
         return;
       }
-      if ((cash + cheque) > Number(deliveryRemaining || 0)) {
+      if ((cash + cheque) > Number(Math.max(0, Number((Number(deliverySale.total || 0) - Number(deliverySale.returnedAmount || 0) - deliveryUndeliveredAmountWithDraft - deliveryPaidSoFar).toFixed(2))) || 0)) {
         setDeliveryError("Cash and cheque total cannot exceed remaining balance.");
         return;
       }
@@ -3192,6 +3551,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <span>Total Spent (LKR)</span>
                     <strong>{formatLkrValue(customerPageSummary.totalSpent || 0)}</strong>
                   </article>
+                  <article>
+                    <span>Available Credit (LKR)</span>
+                    <strong>{formatLkrValue(customerPageSummary.totalAvailableCredit || 0)}</strong>
+                  </article>
                   <article className="warn">
                     <span>Total Outstanding (LKR)</span>
                     <strong>{formatLkrValue(customerPageSummary.totalOutstanding || 0)}</strong>
@@ -3224,6 +3587,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <button type="button" className="th-sort" onClick={() => toggleSort("customers", "phone")}>Phone{sortMark("customers", "phone")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customers", "orders")}>Orders{sortMark("customers", "orders")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customers", "spent")}>Total Spent (LKR){sortMark("customers", "spent")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "availableCredit")}>Available Credit (LKR){sortMark("customers", "availableCredit")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customers", "outstanding")}>Outstanding (LKR){sortMark("customers", "outstanding")}</button>
                   </header>
                 {sortedCustomerRows.length ? sortedCustomerRows.map((row) => (
@@ -3244,6 +3608,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <span>{row.phone || "-"}</span>
                     <span>{row.orders}</span>
                     <span>{formatLkrValue(row.spent || 0)}</span>
+                    <span>{formatLkrValue(row.availableCredit || 0)}</span>
                     <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{formatLkrValue(row.outstanding || 0)}</span>
                   </article>
                 )) : <p>No customer records yet.</p>}
@@ -3712,16 +4077,33 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <div className="snapshot-grid">
                       <article><p>Total sales</p><strong>{dashboard.salesCount}</strong></article>
                       <article><p>Today sales</p><strong>{dashboard.todaySalesCount}</strong></article>
-                      <article><p>Today revenue</p><strong>{dashboard.todayRevenue.toFixed(0)}</strong></article>
+                      <article><p>Today Ordered Value</p><strong>{dashboard.todayRevenue.toFixed(0)}</strong></article>
                       <article><p>Low Stock</p><strong>{dashboard.lowStockItems.length}</strong></article>
                     </div>
                     <div className="snapshot-sidecards">
                       <div className="dashboard-profit-card">
-                        <span className="dashboard-profit-eyebrow">Total Net Profit</span>
-                        <strong>LKR {formatLkrValue(dashboardProfitSummary.profit)}</strong>
+                        <div className="dashboard-profit-head">
+                          <div>
+                            <span className="dashboard-profit-eyebrow">Total Net Profit</span>
+                            <div className="dashboard-profit-date-range">
+                              <label className="dashboard-profit-date-field">
+                                <span>From</span>
+                                <input type="date" value={dashboardProfitDateFrom} onChange={(e) => setDashboardProfitDateFrom(e.target.value)} />
+                              </label>
+                              <label className="dashboard-profit-date-field">
+                                <span>To</span>
+                                <input type="date" value={dashboardProfitDateTo} onChange={(e) => setDashboardProfitDateTo(e.target.value)} />
+                              </label>
+                            </div>
+                          </div>
+                          <strong>LKR {formatLkrValue(dashboardProfitSummary.profit)}</strong>
+                        </div>
                         <div className="dashboard-profit-meta">
                           <span>Revenue <b>LKR {formatLkrValue(dashboardProfitSummary.revenue)}</b></span>
                           <span>Invoice Cost <b>LKR {formatLkrValue(dashboardProfitSummary.cost)}</b></span>
+                        </div>
+                        <div className="dashboard-profit-foot">
+                          <span>{dashboardProfitSummary.filteredSalesCount} bill{dashboardProfitSummary.filteredSalesCount === 1 ? "" : "s"} in range</span>
                         </div>
                         <p>Net margin {dashboardProfitSummary.margin}%</p>
                       </div>
@@ -3887,8 +4269,20 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                       <span>{formatLkrValue(row.total || 0)}</span>
                       <span className="action-cell">
                         <button type="button" className="ghost" onClick={() => setViewSaleId(String(row.id))}>View</button>
-                        <button type="button" className="ghost" onClick={() => openAdminSaleEdit(row.raw)}>Edit</button>
-                        <button type="button" className="row-danger" onClick={() => deleteAdminSale(row.raw)} disabled={deletingSaleId === String(row.id)}>
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() => openAdminSaleEdit(row.raw)}
+                          disabled={Boolean(row.raw?.deliveryConfirmedAt) || Boolean((row.raw?.deliveryAdjustments || []).length) || (state.returns || []).some((ret) => String(ret.saleId) === String(row.id))}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="row-danger"
+                          onClick={() => deleteAdminSale(row.raw)}
+                          disabled={deletingSaleId === String(row.id) || Boolean(row.raw?.deliveryConfirmedAt) || Boolean((row.raw?.deliveryAdjustments || []).length)}
+                        >
                           {deletingSaleId === String(row.id) ? "..." : "🗑"}
                         </button>
                       </span>
@@ -3993,6 +4387,44 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 </section>
               </section>
 
+              <section className="admin-mobile-section report-panel report-rep-outstanding-panel">
+                <h2>Rep Wise Customer Outstanding</h2>
+                <div className="rep-outstanding-summary-grid">
+                  <article>
+                    <span>Reps with Outstanding</span>
+                    <strong>{repOutstandingSummary.reps}</strong>
+                  </article>
+                  <article>
+                    <span>Outstanding Bills</span>
+                    <strong>{repOutstandingSummary.bills}</strong>
+                  </article>
+                  <article>
+                    <span>Affected Customers</span>
+                    <strong>{repOutstandingSummary.customers}</strong>
+                  </article>
+                  <article className="warn">
+                    <span>Total Outstanding (LKR)</span>
+                    <strong>{formatLkrValue(repOutstandingSummary.outstanding)}</strong>
+                  </article>
+                </div>
+                <div className="admin-table rep-outstanding-table">
+                  <header>
+                    <span>Rep</span>
+                    <span>Customers</span>
+                    <span>Bills</span>
+                    <span>Outstanding (LKR)</span>
+                  </header>
+                  {repOutstandingRows.length ? repOutstandingRows.map((row) => (
+                    <article key={`rep-out-${row.rep}`}>
+                      <span>{row.rep}</span>
+                      <span>{row.customers}</span>
+                      <span>{row.bills}</span>
+                      <span className="outstanding-text">{formatLkrValue(row.outstanding)}</span>
+                    </article>
+                  )) : <p>No rep outstanding balances in selected range.</p>}
+                </div>
+              </section>
+
               <section className="admin-mobile-section report-panel report-delivery-panel">
                 <div className="delivery-report-divider">
                   <span>DELIVERY INTELLIGENCE</span>
@@ -4075,7 +4507,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 </div>
               </section>
               <section className="admin-mobile-section loading-lorry-panel loading-lorry-a">
-                <h2>Lorry A Loading</h2>
+                <div className="loading-panel-head">
+                  <h2>Lorry A Loading</h2>
+                  <button type="button" className="receipt-print-action" onClick={() => printLoadingBreakdown({ lorry: "Lorry A", rows: sortedLoadingA, summary: loadingSummaryA })}>Print</button>
+                </div>
                 <div className="loading-summary-grid">
                   <article>
                     <span>Ordered Qty</span>
@@ -4092,6 +4527,36 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <article>
                     <span>Delivered Value</span>
                     <strong>{currency(loadingSummaryA.deliveredValue)}</strong>
+                  </article>
+                  <article className="loading-summary-accent loading-summary-bundles">
+                    <span className="loading-summary-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M4.5 7.5 12 4l7.5 3.5L12 11z" />
+                        <path d="M4.5 7.5V16.5L12 20v-9z" />
+                        <path d="M19.5 7.5V16.5L12 20v-9z" />
+                      </svg>
+                    </span>
+                    <span>Ordered Bundles</span>
+                    <strong>{loadingSummaryA.orderedBundles}</strong>
+                  </article>
+                  <article className="loading-summary-accent loading-summary-singles">
+                    <span className="loading-summary-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M10 3.8h4" />
+                        <path d="M11 3.8v2.1l-1.4 1.7v10.1A2.3 2.3 0 0 0 11.9 20h.2a2.3 2.3 0 0 0 2.3-2.3V7.6L13 5.9V3.8" />
+                        <path d="M9.6 10.6h4.8" />
+                      </svg>
+                    </span>
+                    <span>Ordered Singles</span>
+                    <strong>{loadingSummaryA.orderedSingles}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Bundles</span>
+                    <strong>{loadingSummaryA.deliveredBundles}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Singles</span>
+                    <strong>{loadingSummaryA.deliveredSingles}</strong>
                   </article>
                 </div>
                 <div className="admin-table loading-table loading-table-a">
@@ -4119,7 +4584,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               </section>
 
               <section className="admin-mobile-section loading-lorry-panel loading-lorry-b">
-                <h2>Lorry B Loading</h2>
+                <div className="loading-panel-head">
+                  <h2>Lorry B Loading</h2>
+                  <button type="button" className="receipt-print-action" onClick={() => printLoadingBreakdown({ lorry: "Lorry B", rows: sortedLoadingB, summary: loadingSummaryB })}>Print</button>
+                </div>
                 <div className="loading-summary-grid">
                   <article>
                     <span>Ordered Qty</span>
@@ -4136,6 +4604,36 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <article>
                     <span>Delivered Value</span>
                     <strong>{currency(loadingSummaryB.deliveredValue)}</strong>
+                  </article>
+                  <article className="loading-summary-accent loading-summary-bundles">
+                    <span className="loading-summary-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M4.5 7.5 12 4l7.5 3.5L12 11z" />
+                        <path d="M4.5 7.5V16.5L12 20v-9z" />
+                        <path d="M19.5 7.5V16.5L12 20v-9z" />
+                      </svg>
+                    </span>
+                    <span>Ordered Bundles</span>
+                    <strong>{loadingSummaryB.orderedBundles}</strong>
+                  </article>
+                  <article className="loading-summary-accent loading-summary-singles">
+                    <span className="loading-summary-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24">
+                        <path d="M10 3.8h4" />
+                        <path d="M11 3.8v2.1l-1.4 1.7v10.1A2.3 2.3 0 0 0 11.9 20h.2a2.3 2.3 0 0 0 2.3-2.3V7.6L13 5.9V3.8" />
+                        <path d="M9.6 10.6h4.8" />
+                      </svg>
+                    </span>
+                    <span>Ordered Singles</span>
+                    <strong>{loadingSummaryB.orderedSingles}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Bundles</span>
+                    <strong>{loadingSummaryB.deliveredBundles}</strong>
+                  </article>
+                  <article>
+                    <span>Delivered Singles</span>
+                    <strong>{loadingSummaryB.deliveredSingles}</strong>
                   </article>
                 </div>
                 <div className="admin-table loading-table loading-table-b">
@@ -4202,6 +4700,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 <span>Total Spent (LKR)</span>
                 <strong>{formatLkrValue(customerDetailData.row.spent || 0)}</strong>
               </article>
+              <article>
+                <span>Available Credit (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.availableCredit || 0)}</strong>
+              </article>
               <article className={Number(customerDetailData.row.outstanding || 0) > 0 ? "warn" : ""}>
                 <span>Outstanding (LKR)</span>
                 <strong>{formatLkrValue(customerDetailData.row.outstanding || 0)}</strong>
@@ -4239,7 +4741,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <article key={sale.id}>
                       <span>#{sale.id}</span>
                       <span>{new Date(sale.createdAt).toLocaleDateString()}</span>
-                      <strong>{currency(sale.total || 0)}</strong>
+                      <strong>{currency(saleNetTotal(sale))}</strong>
                     </article>
                   ))}
                 </div>
@@ -4306,8 +4808,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 </header>
                   {(viewedSale.lines || []).map((line) => {
                     const returned = viewedSaleReturnByProduct.get(String(line.productId || "")) || { qty: 0, amount: 0 };
+                    const notDeliveredQty = Number(viewedSaleUndeliveredByProduct.get(String(line.productId || "")) || 0);
                     const originalQty = Number(line.quantity || 0);
-                    const netQty = Math.max(0, originalQty - Number(returned.qty || 0));
+                    const soldAfterDelivery = Math.max(0, originalQty - notDeliveredQty);
+                    const netQty = Math.max(0, soldAfterDelivery - Number(returned.qty || 0));
                     const grossRemaining = Number((Number(line.price || 0) * netQty).toFixed(2));
                     const remainingBillDiscountShare = Number(viewedSale.subTotal || 0) > 0
                       ? Number((Number(viewedSale.discountAmount || viewedSale.discount || 0) * (grossRemaining / Number(viewedSale.subTotal || 1))).toFixed(2))
@@ -4317,6 +4821,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                       <article key={`${viewedSale.id}-${line.productId}`}>
                         <span>
                           {line.sku || productInfoById.get(line.productId)?.sku || "-"}
+                          {notDeliveredQty > 0 ? <small className="sales-return-note">Not Delivered {notDeliveredQty}</small> : null}
                           {Number(returned.qty || 0) > 0 ? <small className="sales-return-note">Returned {returned.qty}</small> : null}
                         </span>
                         <span>{netQty}</span>
@@ -4539,6 +5044,7 @@ export const App = () => {
   const [chequeBank, setChequeBank] = useState("");
   const [discountMode, setDiscountMode] = useState("amount");
   const [discountValue, setDiscountValue] = useState("");
+  const [customerCreditDraft, setCustomerCreditDraft] = useState("");
   const [cart, setCart] = useState([]);
   const [message, setMessage] = useState("");
   const [savingCheckout, setSavingCheckout] = useState(false);
@@ -4590,6 +5096,31 @@ export const App = () => {
     return Number(raw.toFixed(2));
   }, [effectiveCartLines, discountMode, discountValue]);
   const totals = useMemo(() => calculateTotals({ lines: effectiveCartLines, taxRate, discount: discountAmount }), [effectiveCartLines, taxRate, discountAmount]);
+  const customerCreditMap = useMemo(() => {
+    const map = new Map();
+    for (const entry of (state.customerCredits || [])) {
+      const key = String(entry.customerName || "").trim();
+      if (!key) continue;
+      const remaining = Number(entry.remainingAmount ?? entry.amount ?? 0);
+      if (remaining <= 0) continue;
+      map.set(key, Number(map.get(key) || 0) + remaining);
+    }
+    return map;
+  }, [state.customerCredits]);
+  const selectedCustomerAvailableCredit = useMemo(() => {
+    const key = String(customerName || "").trim();
+    if (!key) return 0;
+    return Number(customerCreditMap.get(key) || 0);
+  }, [customerName, customerCreditMap]);
+  const appliedCustomerCredit = useMemo(() => {
+    const requested = Number(customerCreditDraft || 0);
+    if (!Number.isFinite(requested) || requested <= 0) return 0;
+    return Number(Math.max(0, Math.min(requested, selectedCustomerAvailableCredit, Number(totals.total || 0))).toFixed(2));
+  }, [customerCreditDraft, selectedCustomerAvailableCredit, totals.total]);
+  const totalAfterCustomerCredit = useMemo(
+    () => Number(Math.max(0, Number(totals.total || 0) - appliedCustomerCredit).toFixed(2)),
+    [totals.total, appliedCustomerCredit]
+  );
   const currentCartQty = useMemo(
     () => effectiveCartLines.reduce((acc, line) => acc + Number(line.quantity || 0), 0),
     [effectiveCartLines]
@@ -4633,6 +5164,21 @@ export const App = () => {
       sessionStorage.removeItem(SESSION_KEY);
     }
   }, []);
+
+  useEffect(() => {
+    if (!customerName.trim() || selectedCustomerAvailableCredit <= 0) {
+      setCustomerCreditDraft("");
+      return;
+    }
+    const current = Number(customerCreditDraft || 0);
+    if (!Number.isFinite(current) || current < 0) {
+      setCustomerCreditDraft("");
+      return;
+    }
+    if (current > selectedCustomerAvailableCredit) {
+      setCustomerCreditDraft(String(selectedCustomerAvailableCredit));
+    }
+  }, [customerName, selectedCustomerAvailableCredit]);
 
   useEffect(() => {
     if (!session) return undefined;
@@ -4803,6 +5349,7 @@ export const App = () => {
         customerPhone: matchedCustomer?.phone ? String(matchedCustomer.phone).trim() : undefined,
         lorry,
         paymentType,
+        customerCreditAmount: appliedCustomerCredit,
         discount: discountAmount,
         taxRate: 0,
         lines: effectiveCartLines
@@ -4820,6 +5367,7 @@ export const App = () => {
       showSuccessModal("Order completed.");
       setCart([]);
       setDiscountValue("");
+      setCustomerCreditDraft("");
       setCashReceived("");
       setCreditDueDate("");
       setChequeAmount("");
@@ -4868,8 +5416,13 @@ export const App = () => {
           setChequeBank={setChequeBank}
           discountMode={discountMode}
         setDiscountMode={setDiscountMode}
-        discountValue={discountValue}
-        setDiscountValue={setDiscountValue}
+          discountValue={discountValue}
+          setDiscountValue={setDiscountValue}
+          selectedCustomerAvailableCredit={selectedCustomerAvailableCredit}
+          customerCreditDraft={customerCreditDraft}
+          setCustomerCreditDraft={setCustomerCreditDraft}
+          appliedCustomerCredit={appliedCustomerCredit}
+          totalAfterCustomerCredit={totalAfterCustomerCredit}
         lorryLoadMap={lorryLoadMap}
         currentCartQty={currentCartQty}
         cart={cart}
