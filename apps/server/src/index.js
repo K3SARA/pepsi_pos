@@ -473,6 +473,10 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
   const name = String(body.name || "").trim();
   const phone = String(body.phone || "").trim();
   const address = String(body.address || "").trim();
+  const rawOpeningOutstanding = Number(body.openingOutstanding || 0);
+  const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
+    ? roundMoney(rawOpeningOutstanding)
+    : 0;
   if (!name) {
     res.status(400).json({ message: "Customer name is required" });
     return;
@@ -487,6 +491,7 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
     name,
     phone,
     address,
+    openingOutstanding,
     createdAt: new Date().toISOString()
   };
 
@@ -503,6 +508,11 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
 app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, res) => {
   const { id } = req.params;
   const body = req.body || {};
+  const hasOpeningOutstanding = Object.prototype.hasOwnProperty.call(body, "openingOutstanding");
+  const rawOpeningOutstanding = Number(body.openingOutstanding || 0);
+  const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
+    ? roundMoney(rawOpeningOutstanding)
+    : 0;
 
   const next = updateState((state) => {
     state.customers = state.customers || [];
@@ -514,7 +524,11 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, 
         phone: String(body.phone || "").trim()
       };
     } else {
-      state.customers[idx] = { ...state.customers[idx], ...body };
+      state.customers[idx] = {
+        ...state.customers[idx],
+        ...body,
+        ...(hasOpeningOutstanding ? { openingOutstanding } : {})
+      };
     }
     return state;
   });

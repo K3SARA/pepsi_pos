@@ -416,7 +416,7 @@ const openSaleReceiptPrint = ({
 .sign-line { margin-bottom: 8px; letter-spacing: 2px; } .powered { text-align: center; margin-top: 80px; font-size: 20px; }
   </style></head><body><div class="sheet">
 <div class="header"><div class="logo-wrap"><img src="/invoice-pepsi.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
-<div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div></div><div>Invoice No : <span class="dots invoice-dots">${escapeHtml(sale?.id || "-")}</span></div></div></div>
+<div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div>Rep : <span class="dots">${escapeHtml(sale?.cashier || "-")}</span></div><div>Invoice No : <span class="dots invoice-dots">${escapeHtml(sale?.id || "-")}</span></div><div>Lorry : <span class="dots">${escapeHtml(sale?.lorry || "-")}</span></div><div></div></div></div>
 <table><thead><tr><th>Item Code</th><th>Qty</th><th>Billing Price</th><th>Item Discount</th><th>Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
  <div class="totals-grid"><div class="totals-box"><div>EMPTY ISSUE :</div><div>EMPTY RECEIVED :</div></div><div class="summary-box"><div><strong>TOTAL VALUE :</strong> LKR ${toMoney(printedTotal)}</div><div>DISCOUNT : LKR ${toMoney(sale?.discount)}</div>${customerCreditApplied > 0 ? `<div>CUSTOMER CREDIT : - LKR ${toMoney(customerCreditApplied)}</div>` : ""}${returnedAmount > 0 ? `<div>RETURNS : - LKR ${toMoney(returnedAmount)}</div>` : ""}<div>${escapeHtml(paymentDisplay.label)}${paymentDisplay.detail ? ` (${escapeHtml(paymentDisplay.detail)})` : ""}</div></div></div>
 <ul class="notes"><li>Return or exchange only with this receipt</li><li>Credit Payment for all goods shall be made No later than 14 days</li></ul>
@@ -562,8 +562,20 @@ const CashierView = ({
     if (!term) return savedCustomers;
     return savedCustomers.filter((customer) => String(customer.name || "").toLowerCase().includes(term));
   }, [repCustomerSearch, savedCustomers]);
-  const customerOutstandingMap = useMemo(() => {
+  const customerOpeningOutstandingMap = useMemo(() => {
     const map = new Map();
+    for (const customer of (state.customers || [])) {
+      const key = String(customer.name || "").trim();
+      if (!key) continue;
+      const openingOutstanding = Number(customer.openingOutstanding || 0);
+      if (openingOutstanding > 0) {
+        map.set(key, openingOutstanding);
+      }
+    }
+    return map;
+  }, [state.customers]);
+  const customerOutstandingMap = useMemo(() => {
+    const map = new Map(customerOpeningOutstandingMap);
     for (const sale of (state.sales || [])) {
       const key = String(sale.customerName || "").trim();
       if (!key || key.toLowerCase() === "walk-in") continue;
@@ -577,7 +589,7 @@ const CashierView = ({
       }
     }
     return map;
-  }, [state.sales]);
+  }, [state.sales, customerOpeningOutstandingMap]);
   const selectedCustomerOutstanding = useMemo(() => {
     const key = String(customerName || "").trim();
     if (!key) return 0;
@@ -1813,7 +1825,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [activePage, setActivePage] = useState("dashboard");
   const [notice, setNotice] = useState("");
 
-  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "" });
+  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "" });
   const [staffForm, setStaffForm] = useState({ id: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
   const [stockMode, setStockMode] = useState("add");
   const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
@@ -2099,7 +2111,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const map = new Map();
     for (const sale of state.sales) {
       const key = sale.customerName || "Walk-in";
-      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, availableCredit: 0, phone: "", address: "" };
+      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, availableCredit: 0, phone: "", address: "" };
       existing.orders += 1;
       existing.spent += saleNetTotal(sale);
       existing.outstanding += Number(
@@ -2110,11 +2122,17 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       map.set(key, existing);
     }
     for (const customer of (state.customers || [])) {
-      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, availableCredit: 0 };
-      map.set(customer.name, { ...existing, ...customer });
+      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, availableCredit: 0 };
+      const openingOutstanding = Number(customer.openingOutstanding || 0);
+      map.set(customer.name, {
+        ...existing,
+        ...customer,
+        openingOutstanding,
+        outstanding: Number(existing.outstanding || 0) + openingOutstanding
+      });
     }
     for (const [name, credit] of customerCreditMap.entries()) {
-      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, availableCredit: 0 };
+      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, availableCredit: 0 };
       existing.availableCredit = Number(credit || 0);
       map.set(name, existing);
     }
@@ -2135,6 +2153,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       phone: (row) => row.phone || "",
       orders: (row) => Number(row.orders || 0),
       spent: (row) => Number(row.spent || 0),
+      openingOutstanding: (row) => Number(row.openingOutstanding || 0),
       outstanding: (row) => Number(row.outstanding || 0),
       availableCredit: (row) => Number(row.availableCredit || 0)
     }),
@@ -2292,6 +2311,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       returnedValue: Number(returnSummary.value.toFixed(2)),
       averageBillValue,
       lastSaleAt: sales[0]?.createdAt || "",
+      openingOutstanding: Number(row.openingOutstanding || 0),
+      liveSaleOutstanding: Math.max(0, Number(row.outstanding || 0) - Number(row.openingOutstanding || 0)),
       availableCredit: Number(row.availableCredit || 0),
       recentSales: sales.slice(0, 4)
     };
@@ -2317,6 +2338,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       invoicePrice: (row) => Number(row.invoicePrice ?? 0),
       billingPrice: (row) => Number(row.billingPrice ?? row.price ?? 0),
       mrp: (row) => Number(row.mrp ?? row.price ?? 0),
+      totalBundles: (row) => {
+        const bundleSize = getBundleSize(row);
+        return bundleSize > 0 ? Math.floor(Number(row.stock || 0) / bundleSize) : 0;
+      },
       stock: (row) => Number(row.stock || 0)
     }),
     [filteredStockRows, tableSort]
@@ -3137,7 +3162,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   };
 
   const openCustomerAdd = () => {
-    setCustomerForm({ id: "", name: "", phone: "", address: "" });
+    setCustomerForm({ id: "", name: "", phone: "", address: "", openingOutstanding: "" });
     setShowCustomerForm(true);
   };
 
@@ -3147,7 +3172,13 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       setNotice("No customer to edit.");
       return;
     }
-    setCustomerForm({ id: first.id, name: first.name, phone: first.phone || "", address: first.address || "" });
+    setCustomerForm({
+      id: first.id,
+      name: first.name,
+      phone: first.phone || "",
+      address: first.address || "",
+      openingOutstanding: first.openingOutstanding ? String(first.openingOutstanding) : ""
+    });
     setShowCustomerForm(true);
   };
 
@@ -3162,7 +3193,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       id: matched.id,
       name: matched.name || row.name || "",
       phone: matched.phone || row.phone || "",
-      address: matched.address || row.address || ""
+      address: matched.address || row.address || "",
+      openingOutstanding: matched.openingOutstanding ? String(matched.openingOutstanding) : ""
     });
     setShowCustomerForm(true);
   };
@@ -3172,7 +3204,17 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       setNotice("Customer name is required.");
       return;
     }
-    const payload = { name: customerForm.name.trim(), phone: customerForm.phone, address: customerForm.address };
+    const openingOutstanding = Number(customerForm.openingOutstanding || 0);
+    if (!Number.isFinite(openingOutstanding) || openingOutstanding < 0) {
+      setNotice("Opening outstanding must be 0 or more.");
+      return;
+    }
+    const payload = {
+      name: customerForm.name.trim(),
+      phone: customerForm.phone,
+      address: customerForm.address,
+      openingOutstanding: Number(openingOutstanding.toFixed(2))
+    };
     const action = customerForm.id ? updateCustomer(customerForm.id, payload) : createCustomer(payload);
     action
       .then(() => {
@@ -4064,6 +4106,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <button type="button" className="th-sort" onClick={() => toggleSort("stock", "invoicePrice")}>Invoice Price (LKR){sortMark("stock", "invoicePrice")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("stock", "billingPrice")}>Billing Price (LKR){sortMark("stock", "billingPrice")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("stock", "mrp")}>MRP (LKR){sortMark("stock", "mrp")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stock", "totalBundles")}>Total Bundles{sortMark("stock", "totalBundles")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("stock", "stock")}>Stock{sortMark("stock", "stock")}</button>
                     <span className="th-action">Action</span>
                   </header>
@@ -4085,6 +4128,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                       <span>{formatLkrValue(item.invoicePrice ?? 0)}</span>
                       <span>{formatLkrValue(item.billingPrice ?? item.price ?? 0)}</span>
                       <span>{formatLkrValue(item.mrp ?? item.price ?? 0)}</span>
+                      <span>{(() => {
+                        const bundleSize = getBundleSize(item);
+                        return bundleSize > 0 ? Math.floor(Number(item.stock || 0) / bundleSize) : 0;
+                      })()}</span>
                       <span className={item.stock <= 25 ? "low" : ""}>{item.stock}</span>
                     <span className="action-cell">
                       <button
@@ -4945,6 +4992,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
             <div className="admin-inline-form customer-entry-grid">
               <input value={customerForm.name} onChange={(e) => setCustomerForm((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name" />
               <input value={customerForm.phone} onChange={(e) => setCustomerForm((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone" />
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={customerForm.openingOutstanding}
+                onChange={(e) => setCustomerForm((c) => ({ ...c, openingOutstanding: e.target.value }))}
+                placeholder="Opening Outstanding (LKR)"
+              />
               <textarea value={customerForm.address} onChange={(e) => setCustomerForm((c) => ({ ...c, address: e.target.value }))} placeholder="Address" />
               <div className="customer-entry-actions">
                 <button type="button" onClick={saveCustomer}>Save Customer</button>
@@ -4975,9 +5030,17 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 <span>Available Credit (LKR)</span>
                 <strong>{formatLkrValue(customerDetailData.availableCredit || 0)}</strong>
               </article>
+              <article>
+                <span>Opening Outstanding (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.openingOutstanding || 0)}</strong>
+              </article>
               <article className={Number(customerDetailData.row.outstanding || 0) > 0 ? "warn" : ""}>
                 <span>Outstanding (LKR)</span>
                 <strong>{formatLkrValue(customerDetailData.row.outstanding || 0)}</strong>
+              </article>
+              <article>
+                <span>Bill Outstanding (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.liveSaleOutstanding || 0)}</strong>
               </article>
               <article>
                 <span>Total Item Qty</span>
@@ -5071,7 +5134,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
             </div>
             <div className="receipt-preview">
               <h4>M.W.M.B CHANDRASEKARA - MATALE DISTRIBUTOR</h4>
-              <p>{new Date(viewedSale.createdAt).toLocaleString()} • {viewedSale.customerName} • {viewedSalePaymentDisplay.label}{viewedSalePaymentDisplay.detail ? ` (${viewedSalePaymentDisplay.detail})` : ""}</p>
+              <p>{new Date(viewedSale.createdAt).toLocaleString()} • {viewedSale.customerName} • {viewedSale.lorry || "-"} • {viewedSale.cashier || "-"} • {viewedSalePaymentDisplay.label}{viewedSalePaymentDisplay.detail ? ` (${viewedSalePaymentDisplay.detail})` : ""}</p>
               <div className="admin-table receipt-table">
                 <header>
                   <span>Item Code</span>
