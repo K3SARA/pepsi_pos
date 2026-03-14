@@ -639,6 +639,51 @@ const CashierView = ({
       damagedSkus: repStockRows.filter((row) => row.damaged > 0).length
     };
   }, [repStockRows]);
+  const [repStockSort, setRepStockSort] = useState({ key: "name", dir: "asc" });
+  const toggleRepStockSort = (key) => {
+    setRepStockSort((current) => current.key === key
+      ? { key, dir: current.dir === "asc" ? "desc" : "asc" }
+      : { key, dir: "asc" });
+  };
+  const repStockSortMark = (key) => repStockSort.key === key ? (repStockSort.dir === "asc" ? " ▲" : " ▼") : "";
+  const sortedRepStockRows = useMemo(
+    () => {
+      const factor = repStockSort.dir === "asc" ? 1 : -1;
+      const getValue = {
+        name: (row) => String(row.name || ""),
+        billingPrice: (row) => Number(row.billingPrice || 0),
+        mrp: (row) => Number(row.mrp || 0),
+        remaining: (row) => Number(row.remaining || 0)
+      }[repStockSort.key] || ((row) => String(row.name || ""));
+      return [...repStockRows].sort((a, b) => {
+        const av = getValue(a);
+        const bv = getValue(b);
+        if (typeof av === "number" && typeof bv === "number") return (av - bv) * factor;
+        return String(av || "").localeCompare(String(bv || ""), undefined, { numeric: true, sensitivity: "base" }) * factor;
+      });
+    },
+    [repStockRows, repStockSort]
+  );
+  const sortedRepDamagedRows = useMemo(
+    () => {
+      const factor = repStockSort.dir === "asc" ? 1 : -1;
+      const getValue = {
+        name: (row) => String(row.name || ""),
+        billingPrice: (row) => Number(row.billingPrice || 0),
+        mrp: (row) => Number(row.mrp || 0),
+        damaged: (row) => Number(row.damaged || 0)
+      }[repStockSort.key] || ((row) => String(row.name || ""));
+      return [...repStockRows]
+        .filter((row) => row.damaged > 0)
+        .sort((a, b) => {
+          const av = getValue(a);
+          const bv = getValue(b);
+          if (typeof av === "number" && typeof bv === "number") return (av - bv) * factor;
+          return String(av || "").localeCompare(String(bv || ""), undefined, { numeric: true, sensitivity: "base" }) * factor;
+        });
+    },
+    [repStockRows, repStockSort]
+  );
 
   const customerNameOptions = useMemo(() => {
     const names = new Set((state.customers || []).map((item) => String(item.name || "").trim()).filter(Boolean));
@@ -923,6 +968,13 @@ const CashierView = ({
     () => Number(saleEditLines.reduce((acc, line) => acc + (lineFinalPrice(line) * Number(line.quantity || 0)), 0).toFixed(2)),
     [saleEditLines]
   );
+  const closeSaleEdit = () => {
+    setEditingSaleId("");
+    setSaleEditPaymentType(PAYMENT_TYPES[0]);
+    setSaleEditBillDiscount("");
+    setSaleEditLines([]);
+    setSaleEditError("");
+  };
 
   const openSaleEdit = (sale) => {
     const hasDeliveryProcessing = Boolean(sale?.deliveryConfirmedAt) || Boolean((sale?.deliveryAdjustments || []).length);
@@ -972,10 +1024,7 @@ const CashierView = ({
         setSavingSaleEdit(true);
         setSaleEditError("");
       await patchSale(editingSaleId, { lines, paymentType: saleEditPaymentType, discount: billDiscount });
-        setEditingSaleId("");
-        setSaleEditPaymentType(PAYMENT_TYPES[0]);
-        setSaleEditBillDiscount("");
-        setSaleEditLines([]);
+        closeSaleEdit();
       } catch (error) {
         setSaleEditError(error.message);
     } finally {
@@ -1333,7 +1382,7 @@ const CashierView = ({
                       <p>{new Date(returnSale.createdAt).toLocaleString()}</p>
                       <p>{returnSale.customerName} • {returnSale.lorry || "-"}</p>
                     </div>
-                    <strong>{currency(returnSale.total)}</strong>
+                    <strong>{currency(saleNetTotal(returnSale))}</strong>
                   </article>
                   <div className="return-draft-summary">
                     <article>
@@ -1455,83 +1504,6 @@ const CashierView = ({
                 </article>
               ))}
             </div>
-            {editingSaleId ? (
-              <div className="admin-inline-form rep-sale-edit-form">
-                <p className="form-hint rep-sale-edit-title">Editing sale #{editingSaleId}</p>
-                <label className="rep-sale-field rep-sale-edit-payment">
-                  <span>Payment Method</span>
-                  <select value={saleEditPaymentType} onChange={(e) => setSaleEditPaymentType(e.target.value)}>
-                    {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
-                  </select>
-                </label>
-                <label className="rep-sale-field rep-sale-edit-payment">
-                  <span>Total Bill Discount (LKR)</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={saleEditBillDiscount}
-                    onChange={(e) => setSaleEditBillDiscount(e.target.value)}
-                    placeholder="0.00"
-                  />
-                </label>
-                <p className="form-hint">Editable subtotal: {currency(saleEditSubTotal)}</p>
-              {saleEditLines.map((line) => (
-                <div key={line.productId} className="rep-sale-edit-row">
-                  <div className="rep-sale-edit-name">{line.name}</div>
-                  <div className="rep-sale-edit-controls">
-                  <label className="rep-sale-field">
-                    <span>Qty</span>
-                    <input type="number" min="1" value={line.quantity} onChange={(e) => setSaleEditLines((current) => current.map((l) => (l.productId === line.productId ? { ...l, quantity: e.target.value } : l)))} />
-                  </label>
-                  <label className="rep-sale-field">
-                    <span>Type</span>
-                    <select value={line.itemDiscountMode || "amount"} onChange={(e) => setSaleEditLines((current) => current.map((l) => {
-                    if (l.productId !== line.productId) return l;
-                    const nextMode = e.target.value === "percent" ? "percent" : "amount";
-                    const currentValue = Number(l.itemDiscount || 0);
-                    const base = Number(l.basePrice || 0);
-                    return {
-                      ...l,
-                      itemDiscountMode: nextMode,
-                      itemDiscount: nextMode === "percent" ? Math.min(currentValue, 100) : Math.min(currentValue, base)
-                    };
-                  }))}>
-                      <option value="amount">Rs.</option>
-                      <option value="percent">%</option>
-                    </select>
-                  </label>
-                  <label className="rep-sale-field">
-                    <span>Item Discount</span>
-                    <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={line.itemDiscount ?? 0}
-                    onChange={(e) => setSaleEditLines((current) => current.map((l) => {
-                      if (l.productId !== line.productId) return l;
-                      const parsed = Number(e.target.value || 0);
-                      if (!Number.isFinite(parsed) || parsed < 0) return l;
-                      const base = Number(l.basePrice || 0);
-                      return {
-                        ...l,
-                        itemDiscount: l.itemDiscountMode === "percent" ? Math.min(parsed, 100) : Math.min(parsed, base)
-                      };
-                    }))}
-                    placeholder="Disc"
-                  />
-                  </label>
-                  <button type="button" className="row-danger" onClick={() => setSaleEditLines((current) => current.filter((l) => l.productId !== line.productId))}>Remove</button>
-                  </div>
-                </div>
-              ))}
-                  {saleEditError ? <p className="form-hint">{saleEditError}</p> : null}
-                  <div className="rep-sale-edit-actions">
-                    <button type="button" onClick={saveSaleEdit} disabled={savingSaleEdit}>{savingSaleEdit ? "Saving..." : "Save Edit"}</button>
-                  <button type="button" className="ghost" onClick={() => { setEditingSaleId(""); setSaleEditPaymentType(PAYMENT_TYPES[0]); setSaleEditBillDiscount(""); setSaleEditLines([]); setSaleEditError(""); }}>Cancel</button>
-                  </div>
-                </div>
-            ) : null}
           </section>
           <section className="panel">
             <h2>Recent Sales</h2>
@@ -1605,6 +1577,91 @@ const CashierView = ({
         </main>
       ) : null}
 
+      {editingSaleId ? (
+        <div className="low-stock-modal" onClick={closeSaleEdit}>
+          <div className="low-stock-modal-card rep-sale-edit-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Editing sale #{editingSaleId}</h3>
+              <button type="button" className="ghost" onClick={closeSaleEdit}>Close</button>
+            </div>
+            <div className="admin-inline-form rep-sale-edit-form">
+              <label className="rep-sale-field rep-sale-edit-payment">
+                <span>Payment Method</span>
+                <select value={saleEditPaymentType} onChange={(e) => setSaleEditPaymentType(e.target.value)}>
+                  {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                </select>
+              </label>
+              <label className="rep-sale-field rep-sale-edit-payment">
+                <span>Total Bill Discount (LKR)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={saleEditBillDiscount}
+                  onChange={(e) => setSaleEditBillDiscount(e.target.value)}
+                  placeholder="0.00"
+                />
+              </label>
+              <p className="form-hint rep-sale-edit-title">Editable subtotal: {currency(saleEditSubTotal)}</p>
+              {saleEditLines.map((line) => (
+                <div key={line.productId} className="rep-sale-edit-row">
+                  <div className="rep-sale-edit-name">{line.name}</div>
+                  <div className="rep-sale-edit-controls">
+                    <label className="rep-sale-field">
+                      <span>Qty</span>
+                      <input type="number" min="1" value={line.quantity} onChange={(e) => setSaleEditLines((current) => current.map((l) => (l.productId === line.productId ? { ...l, quantity: e.target.value } : l)))} />
+                    </label>
+                    <label className="rep-sale-field">
+                      <span>Type</span>
+                      <select value={line.itemDiscountMode || "amount"} onChange={(e) => setSaleEditLines((current) => current.map((l) => {
+                        if (l.productId !== line.productId) return l;
+                        const nextMode = e.target.value === "percent" ? "percent" : "amount";
+                        const currentValue = Number(l.itemDiscount || 0);
+                        const base = Number(l.basePrice || 0);
+                        return {
+                          ...l,
+                          itemDiscountMode: nextMode,
+                          itemDiscount: nextMode === "percent" ? Math.min(currentValue, 100) : Math.min(currentValue, base)
+                        };
+                      }))}>
+                        <option value="amount">Rs.</option>
+                        <option value="percent">%</option>
+                      </select>
+                    </label>
+                    <label className="rep-sale-field">
+                      <span>Item Discount</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={line.itemDiscount ?? 0}
+                        onChange={(e) => setSaleEditLines((current) => current.map((l) => {
+                          if (l.productId !== line.productId) return l;
+                          const parsed = Number(e.target.value || 0);
+                          if (!Number.isFinite(parsed) || parsed < 0) return l;
+                          const base = Number(l.basePrice || 0);
+                          return {
+                            ...l,
+                            itemDiscount: l.itemDiscountMode === "percent" ? Math.min(parsed, 100) : Math.min(parsed, base)
+                          };
+                        }))}
+                        placeholder="Disc"
+                      />
+                    </label>
+                    <button type="button" className="row-danger" onClick={() => setSaleEditLines((current) => current.filter((l) => l.productId !== line.productId))}>Remove</button>
+                  </div>
+                </div>
+              ))}
+              {saleEditError ? <p className="form-hint">{saleEditError}</p> : null}
+              <div className="rep-sale-edit-actions">
+                <button type="button" onClick={saveSaleEdit} disabled={savingSaleEdit}>{savingSaleEdit ? "Saving..." : "Save Edit"}</button>
+                <button type="button" className="ghost" onClick={closeSaleEdit}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {cashierPage === "stock" ? (
         <main className="grid">
           <section className="panel rep-stock-panel">
@@ -1629,12 +1686,12 @@ const CashierView = ({
             <h2>Remaining Stock</h2>
             <div className="rep-stock-table">
               <header>
-                <span>Item</span>
-                <span>B.Price (LKR)</span>
-                <span>MRP</span>
-                <span>Remaining</span>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("name")}>Item{repStockSortMark("name")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("billingPrice")}>B.Price (LKR){repStockSortMark("billingPrice")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("mrp")}>MRP{repStockSortMark("mrp")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("remaining")}>Remaining{repStockSortMark("remaining")}</button>
               </header>
-              {repStockRows.map((row) => (
+              {sortedRepStockRows.map((row) => (
                 <article key={`remain-${row.id}`}>
                   <span>{row.name}</span>
                   <span>{formatLkrValue(row.billingPrice || 0)}</span>
@@ -1649,13 +1706,12 @@ const CashierView = ({
             <h2>Damaged / Expired Stock</h2>
             <div className="rep-stock-table rep-stock-table-danger">
               <header>
-                <span>Item</span>
-                <span>B.Price (LKR)</span>
-                <span>MRP</span>
-                <span>Damaged Qty</span>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("name")}>Item{repStockSortMark("name")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("billingPrice")}>B.Price (LKR){repStockSortMark("billingPrice")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("mrp")}>MRP{repStockSortMark("mrp")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleRepStockSort("damaged")}>Damaged Qty{repStockSortMark("damaged")}</button>
               </header>
-              {repStockRows.filter((row) => row.damaged > 0).length ? repStockRows
-                .filter((row) => row.damaged > 0)
+              {sortedRepDamagedRows.length ? sortedRepDamagedRows
                 .map((row) => (
                   <article key={`damaged-${row.id}`}>
                     <span>{row.name}</span>
@@ -1739,6 +1795,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [salesDateTo, setSalesDateTo] = useState("");
   const [loadingDateFrom, setLoadingDateFrom] = useState("");
   const [loadingDateTo, setLoadingDateTo] = useState("");
+  const [loadingTimeFrom, setLoadingTimeFrom] = useState("");
+  const [loadingTimeTo, setLoadingTimeTo] = useState("");
   const [customerReportSearch, setCustomerReportSearch] = useState("");
   const [customerPanelSearch, setCustomerPanelSearch] = useState("");
   const [stockPanelSearch, setStockPanelSearch] = useState("");
@@ -1806,6 +1864,15 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     if (to && day > to) return false;
     return true;
   };
+  const inDateTimeRange = (iso, fromDate, toDate, fromTime, toTime) => {
+    const value = new Date(iso).getTime();
+    if (Number.isNaN(value)) return false;
+    const fromBound = fromDate ? new Date(`${fromDate}T${fromTime || "00:00"}:00`).getTime() : null;
+    const toBound = toDate ? new Date(`${toDate}T${toTime || "23:59"}:59`).getTime() : null;
+    if (fromBound !== null && !Number.isNaN(fromBound) && value < fromBound) return false;
+    if (toBound !== null && !Number.isNaN(toBound) && value > toBound) return false;
+    return true;
+  };
 
   const toggleSort = (table, key) => {
     setTableSort((current) => {
@@ -1836,7 +1903,6 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       return String(av || "").localeCompare(String(bv || ""), undefined, { numeric: true, sensitivity: "base" }) * factor;
     });
   };
-
   const chartData = useMemo(() => {
     const base = [];
     const today = new Date();
@@ -1933,7 +1999,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const buildRows = (lorryName) => {
       const map = new Map();
       for (const sale of state.sales) {
-        if (!inDateRange(sale.createdAt, loadingDateFrom, loadingDateTo)) continue;
+        if (!inDateTimeRange(sale.createdAt, loadingDateFrom, loadingDateTo, loadingTimeFrom, loadingTimeTo)) continue;
         if (sale.lorry !== lorryName) continue;
         if (sale.deliveryConfirmedAt) continue;
         for (const line of (sale.lines || [])) {
@@ -1950,14 +2016,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       for (const ret of (state.returns || [])) {
         const retSale = (state.sales || []).find((s) => String(s.id) === String(ret.saleId));
         if (!retSale || retSale.lorry !== lorryName) continue;
-        if (!inDateRange(ret.createdAt, loadingDateFrom, loadingDateTo)) continue;
+        if (!inDateTimeRange(ret.createdAt, loadingDateFrom, loadingDateTo, loadingTimeFrom, loadingTimeTo)) continue;
         for (const line of (ret.lines || [])) {
           returnedByProduct.set(line.productId, (returnedByProduct.get(line.productId) || 0) + Number(line.quantity || 0));
         }
       }
       const deliveredByProduct = new Map();
       for (const sale of state.sales) {
-        if (!inDateRange(sale.createdAt, loadingDateFrom, loadingDateTo)) continue;
+        if (!inDateTimeRange(sale.createdAt, loadingDateFrom, loadingDateTo, loadingTimeFrom, loadingTimeTo)) continue;
         if (sale.lorry !== lorryName) continue;
         if (!sale.deliveryConfirmedAt) continue;
         const returnedByProduct = saleReturnedQtyByProduct(sale, state.returns || []);
@@ -1988,7 +2054,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       "Lorry A": buildRows("Lorry A"),
       "Lorry B": buildRows("Lorry B")
     };
-  }, [state.sales, state.returns, loadingDateFrom, loadingDateTo, productInfoById]);
+  }, [state.sales, state.returns, loadingDateFrom, loadingDateTo, loadingTimeFrom, loadingTimeTo, productInfoById]);
 
   const salesWiseRows = useMemo(() => {
     return reportSales.map((sale) => ({
@@ -2306,6 +2372,18 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     }
     return rows.sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime());
   }, [state.returns]);
+  const sortedAdminReturnRows = useMemo(
+    () => sortRows(adminReturnRows, "returns", "at", {
+      saleId: (row) => Number(row.saleId || 0),
+      item: (row) => String(row.item || ""),
+      qty: (row) => Number(row.qty || 0),
+      amount: (row) => Number(row.amount || 0),
+      rep: (row) => String(row.rep || ""),
+      reason: (row) => String(row.reason || ""),
+      at: (row) => new Date(row.at || 0).getTime()
+    }),
+    [adminReturnRows, tableSort]
+  );
 
   const stockSearchMatches = useMemo(() => {
     const term = stockSearch.trim().toLowerCase();
@@ -2482,6 +2560,15 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     customers: repOutstandingRows.reduce((acc, row) => acc + Number(row.customers || 0), 0),
     outstanding: Number(repOutstandingRows.reduce((acc, row) => acc + Number(row.outstanding || 0), 0).toFixed(2))
   }), [repOutstandingRows]);
+  const sortedRepOutstandingRows = useMemo(
+    () => sortRows(repOutstandingRows, "repOutstanding", "outstanding", {
+      rep: (row) => String(row.rep || ""),
+      customers: (row) => Number(row.customers || 0),
+      bills: (row) => Number(row.bills || 0),
+      outstanding: (row) => Number(row.outstanding || 0)
+    }),
+    [repOutstandingRows, tableSort]
+  );
 
   const loadingSummaryA = useMemo(() => {
     const rows = loadingRowsByLorry["Lorry A"] || [];
@@ -2535,6 +2622,17 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       });
     return rows.sort((a, b) => new Date(b.sale.createdAt).getTime() - new Date(a.sale.createdAt).getTime());
   }, [state.sales, deliveryDateFrom, deliveryDateTo, deliveryLorry]);
+  const sortedDeliveryRows = useMemo(
+    () => sortRows(deliveryRows, "deliveries", "when", {
+      id: (row) => Number(row.id || 0),
+      when: (row) => new Date(row.sale?.createdAt || 0).getTime(),
+      rep: (row) => String(row.rep || ""),
+      lorry: (row) => String(row.lorry || ""),
+      total: (row) => Number(row.total || 0),
+      status: (row) => row.confirmed ? 1 : 0
+    }),
+    [deliveryRows, tableSort]
+  );
 
   const deliveryReportSales = useMemo(
     () => (state.sales || [])
@@ -2579,6 +2677,15 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     qty: deliveredItemRows.reduce((acc, row) => acc + Number(row.qty || 0), 0),
     value: Number(deliveredItemRows.reduce((acc, row) => acc + Number(row.value || 0), 0).toFixed(2))
   }), [deliveredItemRows]);
+  const sortedDeliveredItemRows = useMemo(
+    () => sortRows(deliveredItemRows, "deliveredItems", "qty", {
+      item: (row) => String(row.item || ""),
+      sku: (row) => String(row.sku || ""),
+      qty: (row) => Number(row.qty || 0),
+      value: (row) => Number(row.value || 0)
+    }),
+    [deliveredItemRows, tableSort]
+  );
 
   const soldTotals = useMemo(() => ({
     qty: deliveryReportSales.reduce(
@@ -2656,6 +2763,20 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       deliveryRate
     };
   }, [reportDeliveryRows]);
+  const sortedReportDeliveryRows = useMemo(
+    () => sortRows(reportDeliveryRows, "deliveryReport", "id", {
+      id: (row) => Number(row.id || 0),
+      date: (row) => new Date(row.date || 0).getTime(),
+      rep: (row) => String(row.rep || ""),
+      lorry: (row) => String(row.lorry || ""),
+      status: (row) => String(row.status || ""),
+      soldQty: (row) => Number(row.soldQty || 0),
+      undeliveredQty: (row) => Number(row.undeliveredQty || 0),
+      deliveredQty: (row) => Number(row.deliveredQty || 0),
+      deliveredValue: (row) => Number(row.deliveredValue || 0)
+    }),
+    [reportDeliveryRows, tableSort]
+  );
 
   const viewedSale = useMemo(
     () => (state.sales || []).find((sale) => String(sale.id) === String(viewSaleId)) || null,
@@ -2742,6 +2863,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     () => Math.max(0, Number((Number(deliverySale?.total || 0) - Number(deliverySale?.returnedAmount || 0) - deliveryUndeliveredAmountWithDraft - deliveryPaidSoFar - deliveryDraftSettlement).toFixed(2))),
     [deliverySale?.total, deliverySale?.returnedAmount, deliveryUndeliveredAmountWithDraft, deliveryPaidSoFar, deliveryDraftSettlement]
   );
+  const deliverySettlementLimit = useMemo(() => {
+    const extraUndelivered = Math.max(0, Number((deliveryUndeliveredAmountWithDraft - deliveryUndeliveredAmount).toFixed(2)));
+    return Math.max(0, Number((deliveryRemaining - extraUndelivered).toFixed(2)));
+  }, [deliveryRemaining, deliveryUndeliveredAmountWithDraft, deliveryUndeliveredAmount]);
 
   const openAdminSaleEdit = (sale) => {
     const hasDeliveryProcessing = Boolean(sale?.deliveryConfirmedAt) || Boolean((sale?.deliveryAdjustments || []).length);
@@ -2855,7 +2980,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       setNotice("Allow popups to print loading breakdown.");
       return;
     }
-    const dateRangeLabel = `${loadingDateFrom || "-"} to ${loadingDateTo || "-"}`;
+    const fromLabel = loadingDateFrom ? `${loadingDateFrom}${loadingTimeFrom ? ` ${loadingTimeFrom}` : ""}` : "-";
+    const toLabel = loadingDateTo ? `${loadingDateTo}${loadingTimeTo ? ` ${loadingTimeTo}` : ""}` : "-";
+    const dateRangeLabel = `${fromLabel} to ${toLabel}`;
     const rowsHtml = (rows || []).length ? rows.map((row) => `
       <tr>
         <td>${escapeHtml(String(row.sku || "-"))}</td>
@@ -2975,8 +3102,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         setDeliveryError("Cheque amount must be 0 or more.");
         return;
       }
-      if ((cash + cheque) > Number(Math.max(0, Number((Number(deliverySale.total || 0) - Number(deliverySale.returnedAmount || 0) - deliveryUndeliveredAmountWithDraft - deliveryPaidSoFar).toFixed(2))) || 0)) {
-        setDeliveryError("Cash and cheque total cannot exceed remaining balance.");
+      if ((cash + cheque) > Number((deliverySettlementLimit + 0.01).toFixed(2))) {
+        setDeliveryError(`Cash and cheque total cannot exceed remaining balance (${currency(deliverySettlementLimit)}).`);
         return;
       }
       if (cheque > 0 && (!deliveryChequeNo.trim() || !deliveryChequeDate || !deliveryChequeBank.trim())) {
@@ -3979,14 +4106,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 <h3>Returned Stock</h3>
                 <div className="admin-table returns-table">
                   <header>
-                    <span>Sale ID</span>
-                    <span>Item</span>
-                    <span>Qty</span>
-                      <span>Return Value (LKR)</span>
-                    <span>Rep</span>
-                    <span>Reason</span>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("returns", "saleId")}>Sale ID{sortMark("returns", "saleId")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("returns", "item")}>Item{sortMark("returns", "item")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("returns", "qty")}>Qty{sortMark("returns", "qty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("returns", "amount")}>Return Value (LKR){sortMark("returns", "amount")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("returns", "rep")}>Rep{sortMark("returns", "rep")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("returns", "reason")}>Reason{sortMark("returns", "reason")}</button>
                   </header>
-                  {adminReturnRows.length ? adminReturnRows.map((row) => (
+                  {sortedAdminReturnRows.length ? sortedAdminReturnRows.map((row) => (
                     <article key={row.id}>
                       <span>#{row.saleId}</span>
                       <span>{row.item}</span>
@@ -4115,15 +4242,15 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               </div>
               <div className="admin-table deliveries-table">
                 <header>
-                  <span className="delivery-col-id">Sale ID</span>
-                  <span className="delivery-col-date">Date/Time</span>
-                  <span className="delivery-col-rep">Rep</span>
-                  <span className="delivery-col-lorry">Lorry</span>
-                  <span className="delivery-col-total">Total (LKR)</span>
-                  <span className="delivery-col-status">Status</span>
+                  <button type="button" className="th-sort delivery-col-id" onClick={() => toggleSort("deliveries", "id")}>Sale ID{sortMark("deliveries", "id")}</button>
+                  <button type="button" className="th-sort delivery-col-date" onClick={() => toggleSort("deliveries", "when")}>Date/Time{sortMark("deliveries", "when")}</button>
+                  <button type="button" className="th-sort delivery-col-rep" onClick={() => toggleSort("deliveries", "rep")}>Rep{sortMark("deliveries", "rep")}</button>
+                  <button type="button" className="th-sort delivery-col-lorry" onClick={() => toggleSort("deliveries", "lorry")}>Lorry{sortMark("deliveries", "lorry")}</button>
+                  <button type="button" className="th-sort delivery-col-total" onClick={() => toggleSort("deliveries", "total")}>Total (LKR){sortMark("deliveries", "total")}</button>
+                  <button type="button" className="th-sort delivery-col-status" onClick={() => toggleSort("deliveries", "status")}>Status{sortMark("deliveries", "status")}</button>
                   <span className="th-action delivery-col-action">Action</span>
                 </header>
-                {deliveryRows.length ? deliveryRows.map((row) => (
+                {sortedDeliveryRows.length ? sortedDeliveryRows.map((row) => (
                   <article key={`d-${row.id}`}>
                     <span className="delivery-col-id delivery-sale-cell">
                       <strong className="delivery-sale-id">#{row.id}</strong>
@@ -4180,12 +4307,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               </div>
               <div className="admin-table deliveries-report-table">
                 <header>
-                  <span>Item</span>
-                  <span>SKU</span>
-                  <span>Delivered Qty</span>
-                  <span>Delivered Value</span>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("deliveredItems", "item")}>Item{sortMark("deliveredItems", "item")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("deliveredItems", "sku")}>SKU{sortMark("deliveredItems", "sku")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("deliveredItems", "qty")}>Delivered Qty{sortMark("deliveredItems", "qty")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("deliveredItems", "value")}>Delivered Value{sortMark("deliveredItems", "value")}</button>
                 </header>
-                {deliveredItemRows.length ? deliveredItemRows.map((row) => (
+                {sortedDeliveredItemRows.length ? sortedDeliveredItemRows.map((row) => (
                   <article key={`dr-${row.key}`}>
                     <span>{row.item}</span>
                     <span>{row.sku}</span>
@@ -4545,12 +4672,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 </div>
                 <div className="admin-table rep-outstanding-table">
                   <header>
-                    <span>Rep</span>
-                    <span>Customers</span>
-                    <span>Bills</span>
-                    <span>Outstanding (LKR)</span>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("repOutstanding", "rep")}>Rep{sortMark("repOutstanding", "rep")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("repOutstanding", "customers")}>Customers{sortMark("repOutstanding", "customers")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("repOutstanding", "bills")}>Bills{sortMark("repOutstanding", "bills")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("repOutstanding", "outstanding")}>Outstanding (LKR){sortMark("repOutstanding", "outstanding")}</button>
                   </header>
-                  {repOutstandingRows.length ? repOutstandingRows.map((row) => (
+                  {sortedRepOutstandingRows.length ? sortedRepOutstandingRows.map((row) => (
                     <article key={`rep-out-${row.rep}`}>
                       <span>{row.rep}</span>
                       <span>{row.customers}</span>
@@ -4595,17 +4722,17 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 </div>
                 <div className="admin-table delivery-report-sales-table">
                   <header>
-                    <span>Sale ID</span>
-                    <span>Date</span>
-                    <span>Rep</span>
-                    <span>Lorry</span>
-                    <span>Status</span>
-                    <span>Sold</span>
-                    <span>ND</span>
-                    <span>Delivered</span>
-                    <span>Value (LKR)</span>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "id")}>Sale ID{sortMark("deliveryReport", "id")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "date")}>Date{sortMark("deliveryReport", "date")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "rep")}>Rep{sortMark("deliveryReport", "rep")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "lorry")}>Lorry{sortMark("deliveryReport", "lorry")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "status")}>Status{sortMark("deliveryReport", "status")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "soldQty")}>Sold{sortMark("deliveryReport", "soldQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "undeliveredQty")}>ND{sortMark("deliveryReport", "undeliveredQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "deliveredQty")}>Delivered{sortMark("deliveryReport", "deliveredQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "deliveredValue")}>Value (LKR){sortMark("deliveryReport", "deliveredValue")}</button>
                   </header>
-                  {reportDeliveryRows.length ? reportDeliveryRows.map((row) => (
+                  {sortedReportDeliveryRows.length ? sortedReportDeliveryRows.map((row) => (
                     <article key={`rdr-${row.id}`}>
                       <span>#{row.id}</span>
                       <span>{row.date}</span>
@@ -4637,8 +4764,16 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <input type="date" value={loadingDateFrom} onChange={(e) => setLoadingDateFrom(e.target.value)} />
                   </label>
                   <label className="rep-date-field">
+                    <span>From Time</span>
+                    <input type="time" value={loadingTimeFrom} onChange={(e) => setLoadingTimeFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
                     <span>To</span>
                     <input type="date" value={loadingDateTo} onChange={(e) => setLoadingDateTo(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To Time</span>
+                    <input type="time" value={loadingTimeTo} onChange={(e) => setLoadingTimeTo(e.target.value)} />
                   </label>
                 </div>
               </section>
@@ -5004,6 +5139,44 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               <button type="button" onClick={() => { setDeliverySaleId(""); setDeliveryDraft({}); setDeliveryCashReceived(""); setDeliveryChequeAmount(""); setDeliveryChequeNo(""); setDeliveryChequeDate(""); setDeliveryChequeBank(""); setDeliveryError(""); }}>Close</button>
             </div>
             <p className="form-hint">{new Date(deliverySale.createdAt).toLocaleString()} • {deliverySale.customerName || "Walk-in"} • {deliverySale.cashier || "-"} • {deliverySale.lorry || "-"}</p>
+            <div className="admin-table deliveries-lines-table">
+              <header>
+                <span>Item</span>
+                <span>Sold</span>
+                <span>Already ND</span>
+                <span>Not Delivered</span>
+              </header>
+              {(deliverySale.lines || []).map((line) => {
+                const prevUndelivered = (deliverySale.deliveryAdjustments || [])
+                  .reduce((acc, adj) => acc + (adj.lines || [])
+                    .filter((x) => x.productId === line.productId)
+                    .reduce((xAcc, x) => xAcc + Number(x.quantity || 0), 0), 0);
+                const prevReturnedGood = (state.returns || [])
+                  .filter((ret) => String(ret.saleId) === String(deliverySale.id))
+                  .reduce((acc, ret) => acc + (ret.lines || [])
+                    .filter((x) => x.productId === line.productId && String(x.condition || "").toLowerCase() === "good")
+                    .reduce((xAcc, x) => xAcc + Number(x.quantity || 0), 0), 0);
+                const maxQty = Math.max(0, Number(line.quantity || 0) - prevUndelivered - prevReturnedGood);
+                return (
+                  <article key={`dl-${deliverySale.id}-${line.productId}`}>
+                    <span>{line.name}</span>
+                    <span>{line.quantity}</span>
+                    <span>{prevUndelivered}</span>
+                    <span>
+                      <input
+                        type="number"
+                        min="0"
+                        max={maxQty}
+                        value={deliveryDraft[line.productId] ?? ""}
+                        onChange={(e) => onDeliveryDraftChange(line.productId, e.target.value)}
+                        placeholder={`max ${maxQty}`}
+                        disabled={Boolean(deliverySale.deliveryConfirmedAt)}
+                      />
+                    </span>
+                  </article>
+                );
+              })}
+            </div>
               <div className="delivery-settlement-panel">
                   <div className="delivery-settlement-head">
                     <div>
@@ -5078,44 +5251,6 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               ) : (
                 <p className="form-hint">No payment collected yet.</p>
               )}
-            </div>
-            <div className="admin-table deliveries-lines-table">
-              <header>
-                <span>Item</span>
-                <span>Sold</span>
-                <span>Already ND</span>
-                <span>Not Delivered</span>
-              </header>
-              {(deliverySale.lines || []).map((line) => {
-                const prevUndelivered = (deliverySale.deliveryAdjustments || [])
-                  .reduce((acc, adj) => acc + (adj.lines || [])
-                    .filter((x) => x.productId === line.productId)
-                    .reduce((xAcc, x) => xAcc + Number(x.quantity || 0), 0), 0);
-                const prevReturnedGood = (state.returns || [])
-                  .filter((ret) => String(ret.saleId) === String(deliverySale.id))
-                  .reduce((acc, ret) => acc + (ret.lines || [])
-                    .filter((x) => x.productId === line.productId && String(x.condition || "").toLowerCase() === "good")
-                    .reduce((xAcc, x) => xAcc + Number(x.quantity || 0), 0), 0);
-                const maxQty = Math.max(0, Number(line.quantity || 0) - prevUndelivered - prevReturnedGood);
-                return (
-                  <article key={`dl-${deliverySale.id}-${line.productId}`}>
-                    <span>{line.name}</span>
-                    <span>{line.quantity}</span>
-                    <span>{prevUndelivered}</span>
-                    <span>
-                      <input
-                        type="number"
-                        min="0"
-                        max={maxQty}
-                        value={deliveryDraft[line.productId] ?? ""}
-                        onChange={(e) => onDeliveryDraftChange(line.productId, e.target.value)}
-                        placeholder={`max ${maxQty}`}
-                        disabled={Boolean(deliverySale.deliveryConfirmedAt)}
-                      />
-                    </span>
-                  </article>
-                );
-              })}
             </div>
             <div className="delivery-history">
               <h4>Delivery History</h4>
