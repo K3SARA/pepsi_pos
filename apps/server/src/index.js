@@ -543,6 +543,21 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, 
   res.json(updated);
 });
 
+app.post("/settings/lorry-count-reset", requireAuth, requireRole("admin"), (req, res) => {
+  const now = new Date().toISOString();
+  const next = updateState((state) => {
+    state.settings = state.settings || {};
+    state.settings.lorryCountResetAt = {
+      "Lorry A": now,
+      "Lorry B": now
+    };
+    return state;
+  });
+
+  sendFullSync();
+  res.json(next.settings?.lorryCountResetAt || {});
+});
+
 app.get("/staff", requireAuth, requireRole("admin"), (_req, res) => {
   res.json(getState().staff || []);
 });

@@ -180,3 +180,8 @@ export const updateStaff = (id, payload) =>
     method: "PATCH",
     body: JSON.stringify(payload)
   });
+
+export const resetLorryCount = () =>
+  request("/settings/lorry-count-reset", {
+    method: "POST"
+  });

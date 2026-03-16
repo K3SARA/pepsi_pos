@@ -24,7 +24,8 @@ import {
   submitReturn,
   submitSale,
   updateCustomer,
-  updateStaff
+  updateStaff,
+  resetLorryCount
 } from "./api.js";
 
 const formatLkrValue = (value) => Number(value || 0).toLocaleString("en-US", {
@@ -1854,6 +1855,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [deliveryChequeBank, setDeliveryChequeBank] = useState("");
   const [deliveryError, setDeliveryError] = useState("");
   const [savingDelivery, setSavingDelivery] = useState(false);
+  const [resettingLorryCount, setResettingLorryCount] = useState(false);
   const [tableSort, setTableSort] = useState({});
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -3283,6 +3285,26 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         setNotice(staffForm.id ? "Staff saved." : "User created.");
       })
       .catch((error) => setNotice(error.message));
+  };
+
+  const handleResetLorryCount = async () => {
+    const accepted = await requestConfirm({
+      title: "Reset Lorry Count",
+      message: "Reset both lorry counts to 0 for new orders? This will not change stock, sales, deliveries, or loading reports.",
+      confirmLabel: "Reset Count",
+      cancelLabel: "Cancel",
+      tone: "danger"
+    });
+    if (!accepted) return;
+    try {
+      setResettingLorryCount(true);
+      await resetLorryCount();
+      setNotice("Lorry count reset to 0 for new orders.");
+    } catch (error) {
+      setNotice(error.message || "Unable to reset lorry count.");
+    } finally {
+      setResettingLorryCount(false);
+    }
   };
 
   const openStockAdd = () => {
@@ -4804,7 +4826,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           {activePage === "loadings" ? (
             <div className="admin-mobile loadings-page">
               <section className="admin-mobile-section loading-range-panel">
-                <h2>Loading Date Range</h2>
+                <div className="report-head">
+                  <h2>Loading Date Range</h2>
+                  <button type="button" onClick={handleResetLorryCount} disabled={resettingLorryCount}>
+                    {resettingLorryCount ? "Resetting..." : "Reset Lorry Count"}
+                  </button>
+                </div>
                 <div className="rep-date-filters">
                   <label className="rep-date-field">
                     <span>From</span>
@@ -4823,6 +4850,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <input type="time" value={loadingTimeTo} onChange={(e) => setLoadingTimeTo(e.target.value)} />
                   </label>
                 </div>
+                <p className="form-hint">
+                  Resets only the lorry capacity count used for new orders. Existing sales and loading reports stay unchanged.
+                </p>
               </section>
               <section className="admin-mobile-section loading-lorry-panel loading-lorry-a">
                 <div className="loading-panel-head">
@@ -5504,15 +5534,24 @@ export const App = () => {
   );
   const lorryLoadMap = useMemo(() => {
     const next = { "Lorry A": 0, "Lorry B": 0 };
+    const resetAtMap = state?.settings?.lorryCountResetAt || {};
     for (const sale of (state.sales || [])) {
       const lorryName = String(sale.lorry || "").trim();
       if (!(lorryName in next)) continue;
       if (sale.deliveryConfirmedAt) continue;
+      const resetAt = String(resetAtMap[lorryName] || "").trim();
+      if (resetAt) {
+        const saleCreatedAtTs = new Date(sale.createdAt || 0).getTime();
+        const resetAtTs = new Date(resetAt).getTime();
+        if (Number.isFinite(saleCreatedAtTs) && Number.isFinite(resetAtTs) && saleCreatedAtTs <= resetAtTs) {
+          continue;
+        }
+      }
       const soldQty = (sale.lines || []).reduce((acc, line) => acc + Number(line.quantity || 0), 0);
       next[lorryName] += soldQty;
     }
     return next;
-  }, [state.sales]);
+  }, [state.sales, state?.settings?.lorryCountResetAt]);
 
   useEffect(() => {
     const handleInvalidSession = () => {
