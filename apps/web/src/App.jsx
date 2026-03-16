@@ -81,6 +81,27 @@ const getBundleBreakdown = (row) => {
   if (!bundleSize) return { bundles: 0, singles: qty };
   return { bundles: Math.floor(qty / bundleSize), singles: qty % bundleSize };
 };
+const startOfLocalDay = (value = new Date()) => {
+  const date = new Date(value);
+  date.setHours(0, 0, 0, 0);
+  return date;
+};
+const addDays = (value, days) => {
+  const date = new Date(value);
+  date.setDate(date.getDate() + days);
+  return date;
+};
+const customerOutstandingAging = (sale) => {
+  if (!sale) return { daysLeft: null, label: "-" };
+  const rawDue = String(sale.creditDueDate || "").trim();
+  const dueDate = rawDue ? startOfLocalDay(rawDue) : startOfLocalDay(addDays(sale.createdAt || new Date().toISOString(), 15));
+  const today = startOfLocalDay();
+  const diffDays = Math.round((dueDate.getTime() - today.getTime()) / 86400000);
+  if (diffDays >= 0) {
+    return { daysLeft: diffDays, label: `${diffDays} days left` };
+  }
+  return { daysLeft: diffDays, label: `Overdue by ${Math.abs(diffDays)} days` };
+};
 const productSalePrice = (product) => Number(product?.billingPrice ?? product?.price ?? product?.mrp ?? 0);
 const lineBasePrice = (line) => Number(line?.basePrice ?? line?.price ?? 0);
 const lineStoredDiscountAmount = (line) => {
@@ -119,6 +140,23 @@ const editableLineDiscountValue = (line) => {
   if (applied > 0) return applied;
   if (!Number.isFinite(raw) || raw <= 0) return 0;
   return Math.min(raw, base);
+};
+const billDiscountValue = (discountMode, discountValue, lines) => {
+  const raw = Number(discountValue || 0);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  const subTotal = Number((lines || []).reduce((acc, line) => acc + (Number(line.price || 0) * Number(line.quantity || 0)), 0).toFixed(2));
+  if (String(discountMode || "amount") === "percent") {
+    const clamped = Math.min(raw, 100);
+    return Number(((subTotal * clamped) / 100).toFixed(2));
+  }
+  return Number(raw.toFixed(2));
+};
+const totalDiscountApplied = ({ lines = [], billDiscount = 0 }) => {
+  const lineDiscountTotal = Number((lines || []).reduce((acc, line) => {
+    const qty = Number(line?.quantity || 0);
+    return acc + (lineItemDiscount(line) * Math.max(0, qty));
+  }, 0).toFixed(2));
+  return Number((lineDiscountTotal + Math.max(0, Number(billDiscount || 0))).toFixed(2));
 };
 const salePayments = (sale) => {
   const explicit = Array.isArray(sale?.payments) ? sale.payments : [];
@@ -509,7 +547,9 @@ const CashierView = ({
   setDiscountMode,
   discountValue,
   setDiscountValue,
+  selectedCustomerDiscountLimit,
   selectedCustomerAvailableCredit,
+  cartDiscountTotal,
   customerCreditDraft,
   setCustomerCreditDraft,
   appliedCustomerCredit,
@@ -715,7 +755,17 @@ const CashierView = ({
   const selectedSavedCustomer = useMemo(() => {
     const key = String(customerName || "").trim().toLowerCase();
     if (!key) return null;
-    return (state.customers || []).find((item) => String(item.name || "").trim().toLowerCase() === key) || null;
+    const matches = (state.customers || []).filter((item) => String(item.name || "").trim().toLowerCase() === key);
+    if (!matches.length) return null;
+    return matches.reduce((merged, item) => ({
+      ...(merged || {}),
+      ...item,
+      phone: String(item.phone || "").trim() || String(merged?.phone || "").trim(),
+      address: String(item.address || "").trim() || String(merged?.address || "").trim(),
+      openingOutstanding: Math.max(Number(merged?.openingOutstanding || 0), Number(item.openingOutstanding || 0)),
+      creditLimit: Math.max(Number(merged?.creditLimit || 0), Number(item.creditLimit || 0)),
+      discountLimit: Math.max(Number(merged?.discountLimit || 0), Number(item.discountLimit || 0))
+    }), null);
   }, [customerName, state.customers]);
   const [customerPhoneDraft, setCustomerPhoneDraft] = useState("");
   const [savingCustomerPhone, setSavingCustomerPhone] = useState(false);
@@ -1034,6 +1084,15 @@ const CashierView = ({
           setSaleEditError(`Total bill discount cannot exceed subtotal (${currency(saleEditSubTotal)}).`);
           return;
         }
+        const saleBeingEdited = (state.sales || []).find((sale) => String(sale.id) === String(editingSaleId));
+        const discountLimit = (state.customers || [])
+          .filter((item) => String(item.name || "").trim().toLowerCase() === String(saleBeingEdited?.customerName || "").trim().toLowerCase())
+          .reduce((max, item) => Math.max(max, Number(item.discountLimit || 0)), 0);
+        const totalDiscount = totalDiscountApplied({ lines, billDiscount });
+        if (discountLimit > 0 && totalDiscount > discountLimit) {
+          setSaleEditError(`Customer discount limit is ${currency(discountLimit)}. Current discount is ${currency(totalDiscount)}.`);
+          return;
+        }
         setSavingSaleEdit(true);
         setSaleEditError("");
       await patchSale(editingSaleId, { lines, paymentType: saleEditPaymentType, discount: billDiscount });
@@ -1242,6 +1301,10 @@ const CashierView = ({
                 </div>
               ) : null}
               {customerName.trim() ? <p className="form-hint outstanding-text">Outstanding: {currency(selectedCustomerOutstanding)}</p> : null}
+              {customerName.trim() && selectedCustomerDiscountLimit > 0 ? <p className="form-hint">Discount Limit: {currency(selectedCustomerDiscountLimit)}</p> : null}
+              {customerName.trim() && selectedCustomerDiscountLimit > 0 && cartDiscountTotal > selectedCustomerDiscountLimit ? (
+                <p className="form-hint outstanding-text">Current discount {currency(cartDiscountTotal)} exceeds allowed limit.</p>
+              ) : null}
               {customerName.trim() && selectedCustomerAvailableCredit > 0 ? (
                 <>
                   <p className="form-hint">Available Credit: {currency(selectedCustomerAvailableCredit)}</p>
@@ -1616,6 +1679,18 @@ const CashierView = ({
                 />
               </label>
               <p className="form-hint rep-sale-edit-title">Editable subtotal: {currency(saleEditSubTotal)}</p>
+              {(() => {
+                const saleBeingEdited = (state.sales || []).find((sale) => String(sale.id) === String(editingSaleId));
+                const discountLimit = (state.customers || [])
+                  .filter((item) => String(item.name || "").trim().toLowerCase() === String(saleBeingEdited?.customerName || "").trim().toLowerCase())
+                  .reduce((max, item) => Math.max(max, Number(item.discountLimit || 0)), 0);
+                const totalDiscount = totalDiscountApplied({ lines: saleEditLines, billDiscount: saleEditBillDiscount });
+                return discountLimit > 0 ? (
+                  <p className={`form-hint rep-sale-edit-title${totalDiscount > discountLimit ? " outstanding-text" : ""}`}>
+                    Discount limit: {currency(discountLimit)} • Current discount: {currency(totalDiscount)}
+                  </p>
+                ) : null;
+              })()}
               {saleEditLines.map((line) => (
                 <div key={line.productId} className="rep-sale-edit-row">
                   <div className="rep-sale-edit-name">{line.name}</div>
@@ -1796,6 +1871,7 @@ const CashierView = ({
 const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleDeleted }) => {
   const [showLowStock, setShowLowStock] = useState(false);
   const [showChequeAlertDetails, setShowChequeAlertDetails] = useState(false);
+  const [showCreditLimitAlertDetails, setShowCreditLimitAlertDetails] = useState(false);
   const [selectedRep, setSelectedRep] = useState("");
   const [chartDateFrom, setChartDateFrom] = useState("");
   const [chartDateTo, setChartDateTo] = useState("");
@@ -1826,7 +1902,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [activePage, setActivePage] = useState("dashboard");
   const [notice, setNotice] = useState("");
 
-  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "" });
+  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "" });
   const [staffForm, setStaffForm] = useState({ id: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
   const [stockMode, setStockMode] = useState("add");
   const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
@@ -1844,6 +1920,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [adminSaleEditLines, setAdminSaleEditLines] = useState([]);
   const [adminSaleEditError, setAdminSaleEditError] = useState("");
   const [savingAdminSaleEdit, setSavingAdminSaleEdit] = useState(false);
+  const [repOutstandingDetailRep, setRepOutstandingDetailRep] = useState("");
   const [viewSaleId, setViewSaleId] = useState("");
   const [customerDetailName, setCustomerDetailName] = useState("");
   const [deliverySaleId, setDeliverySaleId] = useState("");
@@ -1856,6 +1933,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [deliveryError, setDeliveryError] = useState("");
   const [savingDelivery, setSavingDelivery] = useState(false);
   const [resettingLorryCount, setResettingLorryCount] = useState(false);
+  const [stockSummaryDetailMode, setStockSummaryDetailMode] = useState("");
   const [tableSort, setTableSort] = useState({});
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
@@ -2113,28 +2191,51 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const map = new Map();
     for (const sale of state.sales) {
       const key = sale.customerName || "Walk-in";
-      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, availableCredit: 0, phone: "", address: "" };
+      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
       existing.orders += 1;
       existing.spent += saleNetTotal(sale);
-      existing.outstanding += Number(
+      const saleOutstanding = Number(
         sale.outstandingAmount !== undefined
           ? sale.outstandingAmount
           : (sale.paymentType === "credit" ? saleNetTotal(sale) : 0)
       ) || 0;
+      existing.outstanding += saleOutstanding;
+      if (saleOutstanding > 0) {
+        const currentOldest = existing.oldestOutstandingSale ? new Date(existing.oldestOutstandingSale.createdAt || 0).getTime() : Infinity;
+        const candidate = new Date(sale.createdAt || 0).getTime();
+        if (candidate < currentOldest) {
+          existing.oldestOutstandingSale = sale;
+        }
+        existing.topOutstandingRep = existing.topOutstandingRep || String(sale.cashier || "-").trim() || "-";
+      }
       map.set(key, existing);
     }
     for (const customer of (state.customers || [])) {
-      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, availableCredit: 0 };
-      const openingOutstanding = Number(customer.openingOutstanding || 0);
+      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
+      const openingOutstanding = Math.max(Number(existing.openingOutstanding || 0), Number(customer.openingOutstanding || 0));
+      const creditLimit = Math.max(Number(existing.creditLimit || 0), Number(customer.creditLimit || 0));
+      const discountLimit = Math.max(Number(existing.discountLimit || 0), Number(customer.discountLimit || 0));
+      const phone = String(customer.phone || "").trim() || String(existing.phone || "").trim();
+      const address = String(customer.address || "").trim() || String(existing.address || "").trim();
+      const liveOutstanding = Math.max(0, Number(existing.outstanding || 0) - Number(existing.openingOutstanding || 0));
+      const aging = existing.oldestOutstandingSale
+        ? customerOutstandingAging(existing.oldestOutstandingSale)
+        : (openingOutstanding > 0 ? { daysLeft: null, label: "Opening due" } : { daysLeft: null, label: "-" });
       map.set(customer.name, {
         ...existing,
         ...customer,
+        phone,
+        address,
         openingOutstanding,
-        outstanding: Number(existing.outstanding || 0) + openingOutstanding
+        creditLimit,
+        discountLimit,
+        outstanding: liveOutstanding + openingOutstanding,
+        outstandingDaysLeft: aging.daysLeft,
+        outstandingDaysLabel: aging.label
       });
     }
     for (const [name, credit] of customerCreditMap.entries()) {
-      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, availableCredit: 0 };
+      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, availableCredit: 0, outstandingDaysLeft: null, outstandingDaysLabel: "-", topOutstandingRep: "" };
       existing.availableCredit = Number(credit || 0);
       map.set(name, existing);
     }
@@ -2157,6 +2258,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       spent: (row) => Number(row.spent || 0),
       openingOutstanding: (row) => Number(row.openingOutstanding || 0),
       outstanding: (row) => Number(row.outstanding || 0),
+      daysLeft: (row) => {
+        const value = row.outstandingDaysLeft;
+        return value === null || value === undefined ? Number.POSITIVE_INFINITY : Number(value);
+      },
       availableCredit: (row) => Number(row.availableCredit || 0)
     }),
     [filteredCustomerRows, tableSort]
@@ -2222,6 +2327,27 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       rows
     };
   }, [state.sales]);
+  const creditLimitAlertSummary = useMemo(() => {
+    const rows = (customerRows || [])
+      .filter((row) => Number(row.creditLimit || 0) > 0)
+      .filter((row) => Number(row.outstanding || 0) > Number(row.creditLimit || 0))
+      .map((row) => ({
+        customer: row.name,
+        phone: row.phone || "-",
+        rep: row.topOutstandingRep || "-",
+        creditLimit: Number(row.creditLimit || 0),
+        outstanding: Number(row.outstanding || 0),
+        daysLabel: row.outstandingDaysLabel || "-",
+        exceededBy: Number((Number(row.outstanding || 0) - Number(row.creditLimit || 0)).toFixed(2))
+      }))
+      .sort((a, b) => Number(b.exceededBy || 0) - Number(a.exceededBy || 0));
+    return {
+      count: rows.length,
+      totalExceeded: Number(rows.reduce((acc, row) => acc + Number(row.exceededBy || 0), 0).toFixed(2)),
+      top: rows[0] || null,
+      rows
+    };
+  }, [customerRows]);
   const upcomingChequeSummary = useMemo(() => {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -2352,6 +2478,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const rows = sortedStockRows || [];
     const totalSkus = rows.length;
     const totalUnits = rows.reduce((acc, row) => acc + Number(row.stock || 0), 0);
+    const totalBundles = rows.reduce((acc, row) => {
+      const bundleSize = getBundleSize(row);
+      return acc + (bundleSize > 0 ? Math.floor(Number(row.stock || 0) / bundleSize) : 0);
+    }, 0);
     const lowStockThreshold = Number(state?.settings?.lowStockThreshold ?? 25);
     const lowStockCount = rows.filter((row) => Number(row.stock || 0) <= lowStockThreshold).length;
     const outOfStockCount = rows.filter((row) => Number(row.stock || 0) <= 0).length;
@@ -2371,6 +2501,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     return {
       totalSkus,
       totalUnits,
+      totalBundles,
       lowStockCount,
         outOfStockCount,
         inventoryInvoice,
@@ -2380,6 +2511,26 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       topStockUnits: Number(topStockItem?.stock || 0)
     };
   }, [sortedStockRows, state?.settings?.lowStockThreshold]);
+  const stockSummaryDetailRows = useMemo(() => {
+    const rows = sortedStockRows || [];
+    const lowStockThreshold = Number(state?.settings?.lowStockThreshold ?? 25);
+    if (stockSummaryDetailMode === "bundles") {
+      return rows
+        .map((row) => {
+          const bundleSize = getBundleSize(row);
+          const totalBundles = bundleSize > 0 ? Math.floor(Number(row.stock || 0) / bundleSize) : 0;
+          return { ...row, totalBundles, bundleSize };
+        })
+        .filter((row) => Number(row.bundleSize || 0) > 0 && Number(row.totalBundles || 0) > 0);
+    }
+    if (stockSummaryDetailMode === "low") {
+      return rows.filter((row) => Number(row.stock || 0) > 0 && Number(row.stock || 0) <= lowStockThreshold);
+    }
+    if (stockSummaryDetailMode === "out") {
+      return rows.filter((row) => Number(row.stock || 0) <= 0);
+    }
+    return [];
+  }, [sortedStockRows, state?.settings?.lowStockThreshold, stockSummaryDetailMode]);
 
   const adminReturnRows = useMemo(() => {
     const rows = [];
@@ -2512,6 +2663,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const sortedLoadingA = useMemo(
     () => sortRows(loadingRowsByLorry["Lorry A"], "loadingA", "orderedQty", {
       sku: (row) => row.sku || "",
+      size: (row) => row.size || "",
       name: (row) => row.name,
       orderedQty: (row) => Number(row.orderedQty || 0),
       orderedValue: (row) => Number(row.orderedValue || 0),
@@ -2526,6 +2678,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const sortedLoadingB = useMemo(
     () => sortRows(loadingRowsByLorry["Lorry B"], "loadingB", "orderedQty", {
       sku: (row) => row.sku || "",
+      size: (row) => row.size || "",
       name: (row) => row.name,
       orderedQty: (row) => Number(row.orderedQty || 0),
       orderedValue: (row) => Number(row.orderedValue || 0),
@@ -2581,6 +2734,28 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       }))
       .sort((a, b) => b.outstanding - a.outstanding);
   }, [reportSales]);
+  const repOutstandingDetailRows = useMemo(() => {
+    const repKey = String(repOutstandingDetailRep || "").trim();
+    if (!repKey) return [];
+    const map = new Map();
+    for (const sale of reportSales) {
+      const outstanding = Number(sale.outstandingAmount || 0);
+      if (outstanding <= 0) continue;
+      if ((String(sale.cashier || "-").trim() || "-") !== repKey) continue;
+      const customerName = String(sale.customerName || "Walk-in").trim() || "Walk-in";
+      const row = map.get(customerName) || { customerName, bills: 0, outstanding: 0 };
+      row.bills += 1;
+      row.outstanding += outstanding;
+      map.set(customerName, row);
+    }
+    return [...map.values()]
+      .map((row) => ({
+        customerName: row.customerName,
+        bills: row.bills,
+        outstanding: Number(row.outstanding.toFixed(2))
+      }))
+      .sort((a, b) => Number(b.outstanding || 0) - Number(a.outstanding || 0));
+  }, [repOutstandingDetailRep, reportSales]);
   const repOutstandingSummary = useMemo(() => ({
     reps: repOutstandingRows.length,
     bills: repOutstandingRows.reduce((acc, row) => acc + Number(row.bills || 0), 0),
@@ -3092,6 +3267,86 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     setTimeout(() => printWindow.print(), 250);
   };
 
+  const printRepOutstandingCustomers = ({ rep, rows }) => {
+    const printWindow = window.open("", "_blank", "width=980,height=900");
+    if (!printWindow) {
+      setNotice("Allow popups to print rep outstanding details.");
+      return;
+    }
+    const generatedAt = new Date().toLocaleString();
+    const totalBills = Number((rows || []).reduce((acc, row) => acc + Number(row.bills || 0), 0));
+    const totalOutstanding = Number((rows || []).reduce((acc, row) => acc + Number(row.outstanding || 0), 0).toFixed(2));
+    const bodyRows = (rows || []).length
+      ? rows.map((row) => `
+        <tr>
+          <td>${escapeHtml(String(row.customerName || "-"))}</td>
+          <td>${Number(row.bills || 0)}</td>
+          <td>LKR ${formatLkrValue(row.outstanding || 0)}</td>
+        </tr>
+      `).join("")
+      : `<tr><td colspan="3">No outstanding customers for this rep in the selected range.</td></tr>`;
+    const printHtml = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${escapeHtml(rep)} Customer Outstanding</title>
+  <style>
+    @page { size: A4 portrait; margin: 10mm; }
+    body { margin: 0; background: #fff; font-family: "Segoe UI", Arial, sans-serif; color: #122640; }
+    .sheet { width: 100%; max-width: 190mm; margin: 0 auto; padding: 4mm; }
+    .head { display: grid; grid-template-columns: 82px 1fr; gap: 14px; align-items: center; border: 1px solid #cdd9e8; border-radius: 18px; padding: 14px 16px; background: linear-gradient(135deg, #fbfdff 0%, #eef4fc 46%, #e2ecfa 100%); }
+    .head img { width: 74px; height: 74px; object-fit: contain; }
+    .head h1 { margin: 0; font-size: 24px; line-height: 1.05; }
+    .head p { margin: 6px 0 0; color: #4e647d; font-size: 13px; }
+    .summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 12px; }
+    .summary article { border: 1px solid #d2ddea; border-radius: 14px; padding: 10px 12px; background: #f7fbff; }
+    .summary span { display: block; color: #536980; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .summary strong { display: block; margin-top: 5px; font-size: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border: 1px solid #afbdd0; padding: 9px 10px; font-size: 13px; }
+    th { background: #e5edf8; text-transform: uppercase; font-size: 12px; letter-spacing: .04em; text-align: left; }
+    th:nth-child(2), th:nth-child(3), td:nth-child(2), td:nth-child(3) { text-align: center; }
+    .footer { margin-top: 18px; display: flex; justify-content: space-between; gap: 16px; color: #5b6f86; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="head">
+      <img src="/invoice-pepsi.png" alt="Pepsi" />
+      <div>
+        <h1>${escapeHtml(rep)} Customer Outstanding</h1>
+        <p>Outstanding customer summary by rep</p>
+      </div>
+    </div>
+    <div class="summary">
+      <article><span>Customers</span><strong>${Number(rows?.length || 0)}</strong></article>
+      <article><span>Bills</span><strong>${totalBills}</strong></article>
+      <article><span>Outstanding</span><strong>LKR ${formatLkrValue(totalOutstanding)}</strong></article>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Customer</th>
+          <th>Bills</th>
+          <th>Outstanding (LKR)</th>
+        </tr>
+      </thead>
+      <tbody>${bodyRows}</tbody>
+    </table>
+    <div class="footer">
+      <div>Generated on ${escapeHtml(generatedAt)}</div>
+      <div>J&amp;Co. Software Solutions</div>
+    </div>
+  </div>
+</body>
+</html>`;
+    printWindow.document.open();
+    printWindow.document.write(printHtml);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => printWindow.print(), 250);
+  };
+
   const openDeliveryModal = (sale) => {
     setDeliverySaleId(String(sale.id));
     setDeliveryDraft({});
@@ -3164,7 +3419,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   };
 
   const openCustomerAdd = () => {
-    setCustomerForm({ id: "", name: "", phone: "", address: "", openingOutstanding: "" });
+    setCustomerForm({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "" });
     setShowCustomerForm(true);
   };
 
@@ -3179,7 +3434,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       name: first.name,
       phone: first.phone || "",
       address: first.address || "",
-      openingOutstanding: first.openingOutstanding ? String(first.openingOutstanding) : ""
+      openingOutstanding: first.openingOutstanding ? String(first.openingOutstanding) : "",
+      creditLimit: first.creditLimit ? String(first.creditLimit) : "",
+      discountLimit: first.discountLimit ? String(first.discountLimit) : ""
     });
     setShowCustomerForm(true);
   };
@@ -3196,7 +3453,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       name: matched.name || row.name || "",
       phone: matched.phone || row.phone || "",
       address: matched.address || row.address || "",
-      openingOutstanding: matched.openingOutstanding ? String(matched.openingOutstanding) : ""
+      openingOutstanding: matched.openingOutstanding ? String(matched.openingOutstanding) : "",
+      creditLimit: matched.creditLimit ? String(matched.creditLimit) : "",
+      discountLimit: matched.discountLimit ? String(matched.discountLimit) : ""
     });
     setShowCustomerForm(true);
   };
@@ -3207,15 +3466,27 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       return;
     }
     const openingOutstanding = Number(customerForm.openingOutstanding || 0);
+    const creditLimit = Number(customerForm.creditLimit || 0);
+    const discountLimit = Number(customerForm.discountLimit || 0);
     if (!Number.isFinite(openingOutstanding) || openingOutstanding < 0) {
       setNotice("Opening outstanding must be 0 or more.");
+      return;
+    }
+    if (!Number.isFinite(creditLimit) || creditLimit < 0) {
+      setNotice("Credit limit must be 0 or more.");
+      return;
+    }
+    if (!Number.isFinite(discountLimit) || discountLimit < 0) {
+      setNotice("Discount limit must be 0 or more.");
       return;
     }
     const payload = {
       name: customerForm.name.trim(),
       phone: customerForm.phone,
       address: customerForm.address,
-      openingOutstanding: Number(openingOutstanding.toFixed(2))
+      openingOutstanding: Number(openingOutstanding.toFixed(2)),
+      creditLimit: Number(creditLimit.toFixed(2)),
+      discountLimit: Number(discountLimit.toFixed(2))
     };
     const action = customerForm.id ? updateCustomer(customerForm.id, payload) : createCustomer(payload);
     action
@@ -3810,6 +4081,52 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               </span>
             </button>
           ))}
+          <section className="sidebar-bundle-guide" aria-label="Bundle counting guide">
+            <div className="sidebar-bundle-guide-head">
+              <span className="sidebar-bundle-guide-kicker">Bundle Logic</span>
+              <strong>How Bundles Are Counted</strong>
+            </div>
+            <p className="sidebar-bundle-guide-note">
+              The app converts units into bundles by bottle size. Anything left after full bundles is counted as singles.
+            </p>
+            <div className="sidebar-bundle-guide-grid">
+              <article>
+                <span>200 ml</span>
+                <strong>30 per bundle</strong>
+              </article>
+              <article>
+                <span>250 ml</span>
+                <strong>30 per bundle</strong>
+              </article>
+              <article>
+                <span>300 ml</span>
+                <strong>24 per bundle</strong>
+              </article>
+              <article>
+                <span>400 ml</span>
+                <strong>24 per bundle</strong>
+              </article>
+              <article>
+                <span>500 ml</span>
+                <strong>24 per bundle</strong>
+              </article>
+              <article>
+                <span>1000 ml</span>
+                <strong>12 per bundle</strong>
+              </article>
+              <article>
+                <span>1500 ml</span>
+                <strong>12 per bundle</strong>
+              </article>
+              <article>
+                <span>2000 ml</span>
+                <strong>9 per bundle</strong>
+              </article>
+            </div>
+            <p className="sidebar-bundle-guide-foot">
+              Water rule: <strong>1000 ml = 15</strong>, <strong>1500 ml = 12</strong>, <strong>500 ml = 24</strong>.
+            </p>
+          </section>
           <div className="side-menu-footer">
             <a href="https://www.jnco.tech" target="_blank" rel="noreferrer">
               <img src="/powered.png" alt="Powered by" />
@@ -3908,6 +4225,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <button type="button" className="th-sort" onClick={() => toggleSort("customers", "spent")}>Total Spent (LKR){sortMark("customers", "spent")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customers", "availableCredit")}>Available Credit (LKR){sortMark("customers", "availableCredit")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customers", "outstanding")}>Outstanding (LKR){sortMark("customers", "outstanding")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("customers", "daysLeft")}>Days Left{sortMark("customers", "daysLeft")}</button>
                   </header>
                 {sortedCustomerRows.length ? sortedCustomerRows.map((row) => (
                   <article
@@ -3929,6 +4247,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <span>{formatLkrValue(row.spent || 0)}</span>
                     <span>{formatLkrValue(row.availableCredit || 0)}</span>
                     <span className={Number(row.outstanding || 0) > 0 ? "outstanding-text" : ""}>{formatLkrValue(row.outstanding || 0)}</span>
+                    <span className={String(row.outstandingDaysLabel || "").toLowerCase().includes("overdue") ? "outstanding-text" : ""}>{row.outstandingDaysLabel || "-"}</span>
                   </article>
                 )) : <p>No customer records yet.</p>}
               </div>
@@ -4093,11 +4412,47 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <span>Total Units</span>
                     <strong>{stockPageSummary.totalUnits}</strong>
                   </article>
-                  <article className="warn">
+                  <article
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setStockSummaryDetailMode("bundles")}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setStockSummaryDetailMode("bundles");
+                      }
+                    }}
+                  >
+                    <span>Total Bundles</span>
+                    <strong>{stockPageSummary.totalBundles}</strong>
+                  </article>
+                  <article
+                    className="warn"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setStockSummaryDetailMode("low")}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setStockSummaryDetailMode("low");
+                      }
+                    }}
+                  >
                     <span>Low Stock</span>
                     <strong>{stockPageSummary.lowStockCount}</strong>
                   </article>
-                  <article className="warn soft">
+                  <article
+                    className="warn soft"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setStockSummaryDetailMode("out")}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setStockSummaryDetailMode("out");
+                      }
+                    }}
+                  >
                     <span>Out of Stock</span>
                     <strong>{stockPageSummary.outOfStockCount}</strong>
                   </article>
@@ -4395,6 +4750,24 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
           {activePage === "dashboard" ? (
             <div className="admin-mobile admin-dashboard">
+                <div className="dashboard-notification-row">
+                  <button
+                    type="button"
+                    className="dashboard-bell-button"
+                    onClick={() => setShowCreditLimitAlertDetails(true)}
+                    aria-label="Open credit limit notifications"
+                  >
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M15 17H5.8c-.7 0-1.1-.8-.7-1.4l1.2-1.8V10a5.7 5.7 0 1 1 11.4 0v3.8l1.2 1.8c.4.6 0 1.4-.7 1.4H15" />
+                      <path d="M9.5 17a2.5 2.5 0 0 0 5 0" />
+                    </svg>
+                    {creditLimitAlertSummary.count > 0 ? <span className="dashboard-bell-badge">{creditLimitAlertSummary.count > 9 ? "9+" : creditLimitAlertSummary.count}</span> : null}
+                  </button>
+                  <div className="dashboard-notification-copy">
+                    <strong>Notifications</strong>
+                    <span>{creditLimitAlertSummary.count ? `${creditLimitAlertSummary.count} customer limit alert${creditLimitAlertSummary.count === 1 ? "" : "s"}` : "No credit-limit alerts right now"}</span>
+                  </div>
+                </div>
                 {upcomingChequeSummary.count ? (
                   <button type="button" className="admin-mobile-section dashboard-headline-banner cheque-headline-banner dashboard-headline-button" onClick={() => setShowChequeAlertDetails(true)}>
                     <strong>Cheque Alert Tomorrow</strong>
@@ -4451,6 +4824,17 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                             Top overdue: {overdueCreditSummary.top?.customer || "-"}
                             {" • "}
                             {overdueCreditSummary.top?.maxDays || 0} days
+                          </p>
+                        </div>
+                      ) : null}
+                      {creditLimitAlertSummary.count ? (
+                        <div className="dashboard-alert-card dashboard-alert-card-credit-limit">
+                          <strong>Credit Limit Exceeded</strong>
+                          <span>{creditLimitAlertSummary.count} customer(s) • LKR {formatLkrValue(creditLimitAlertSummary.totalExceeded)} over limit</span>
+                          <p>
+                            Top alert: {creditLimitAlertSummary.top?.customer || "-"}
+                            {" • exceeded by "}
+                            {formatLkrValue(creditLimitAlertSummary.top?.exceededBy || 0)}
                           </p>
                         </div>
                       ) : null}
@@ -4749,7 +5133,20 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   {sortedRepOutstandingRows.length ? sortedRepOutstandingRows.map((row) => (
                     <article key={`rep-out-${row.rep}`}>
                       <span>{row.rep}</span>
-                      <span>{row.customers}</span>
+                      <span
+                        className="rep-outstanding-detail-trigger"
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setRepOutstandingDetailRep(row.rep)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setRepOutstandingDetailRep(row.rep);
+                          }
+                        }}
+                      >
+                        {row.customers}
+                      </span>
                       <span>{row.bills}</span>
                       <span className="outstanding-text">{formatLkrValue(row.outstanding)}</span>
                     </article>
@@ -4910,6 +5307,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 <div className="admin-table loading-table loading-table-a">
                   <header>
                     <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingA", "sku")}>SKU{sortMark("loadingA", "sku")}</button>
+                    <button type="button" className="th-sort loading-col-size" onClick={() => toggleSort("loadingA", "size")}>Size{sortMark("loadingA", "size")}</button>
                     <button type="button" className="th-sort loading-col-ordered-qty" onClick={() => toggleSort("loadingA", "orderedQty")}>Ord Qty{sortMark("loadingA", "orderedQty")}</button>
                     <button type="button" className="th-sort loading-col-ordered-value" onClick={() => toggleSort("loadingA", "orderedValue")}>Ord Value{sortMark("loadingA", "orderedValue")}</button>
                     <button type="button" className="th-sort loading-col-bundles" onClick={() => toggleSort("loadingA", "bundles")}>Bundles{sortMark("loadingA", "bundles")}</button>
@@ -4920,6 +5318,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   {sortedLoadingA.length ? sortedLoadingA.map((row) => (
                     <article key={`a-${row.key}`}>
                       <span className="loading-col-item">{row.sku || "-"}</span>
+                      <span className="loading-col-size">{row.size || "-"}</span>
                       <span className="loading-col-ordered-qty">{row.orderedQty}</span>
                       <span className="loading-col-ordered-value">{currency(row.orderedValue)}</span>
                       <span className="loading-col-bundles">{row.bundles}</span>
@@ -4987,6 +5386,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 <div className="admin-table loading-table loading-table-b">
                   <header>
                     <button type="button" className="th-sort loading-col-item" onClick={() => toggleSort("loadingB", "sku")}>SKU{sortMark("loadingB", "sku")}</button>
+                    <button type="button" className="th-sort loading-col-size" onClick={() => toggleSort("loadingB", "size")}>Size{sortMark("loadingB", "size")}</button>
                     <button type="button" className="th-sort loading-col-ordered-qty" onClick={() => toggleSort("loadingB", "orderedQty")}>Ord Qty{sortMark("loadingB", "orderedQty")}</button>
                     <button type="button" className="th-sort loading-col-ordered-value" onClick={() => toggleSort("loadingB", "orderedValue")}>Ord Value{sortMark("loadingB", "orderedValue")}</button>
                     <button type="button" className="th-sort loading-col-bundles" onClick={() => toggleSort("loadingB", "bundles")}>Bundles{sortMark("loadingB", "bundles")}</button>
@@ -4997,6 +5397,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   {sortedLoadingB.length ? sortedLoadingB.map((row) => (
                     <article key={`b-${row.key}`}>
                       <span className="loading-col-item">{row.sku || "-"}</span>
+                      <span className="loading-col-size">{row.size || "-"}</span>
                       <span className="loading-col-ordered-qty">{row.orderedQty}</span>
                       <span className="loading-col-ordered-value">{currency(row.orderedValue)}</span>
                       <span className="loading-col-bundles">{row.bundles}</span>
@@ -5020,21 +5421,125 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               <button type="button" onClick={() => setShowCustomerForm(false)}>Close</button>
             </div>
             <div className="admin-inline-form customer-entry-grid">
-              <input value={customerForm.name} onChange={(e) => setCustomerForm((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name" />
-              <input value={customerForm.phone} onChange={(e) => setCustomerForm((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone" />
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={customerForm.openingOutstanding}
-                onChange={(e) => setCustomerForm((c) => ({ ...c, openingOutstanding: e.target.value }))}
-                placeholder="Opening Outstanding (LKR)"
-              />
-              <textarea value={customerForm.address} onChange={(e) => setCustomerForm((c) => ({ ...c, address: e.target.value }))} placeholder="Address" />
+              <label className="customer-entry-field">
+                <span>Customer Name</span>
+                <input value={customerForm.name} onChange={(e) => setCustomerForm((c) => ({ ...c, name: e.target.value }))} placeholder="Customer name" />
+              </label>
+              <label className="customer-entry-field">
+                <span>Phone</span>
+                <input value={customerForm.phone} onChange={(e) => setCustomerForm((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone" />
+              </label>
+              <label className="customer-entry-field">
+                <span>Opening Outstanding (LKR)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={customerForm.openingOutstanding}
+                  onChange={(e) => setCustomerForm((c) => ({ ...c, openingOutstanding: e.target.value }))}
+                  placeholder="Opening Outstanding (LKR)"
+                />
+              </label>
+              <label className="customer-entry-field">
+                <span>Credit Limit (LKR)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={customerForm.creditLimit}
+                  onChange={(e) => setCustomerForm((c) => ({ ...c, creditLimit: e.target.value }))}
+                  placeholder="Credit Limit (LKR)"
+                />
+              </label>
+              <label className="customer-entry-field">
+                <span>Discount Limit (LKR)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={customerForm.discountLimit}
+                  onChange={(e) => setCustomerForm((c) => ({ ...c, discountLimit: e.target.value }))}
+                  placeholder="Discount Limit (LKR)"
+                />
+              </label>
+              <label className="customer-entry-field customer-entry-field-full">
+                <span>Address</span>
+                <textarea value={customerForm.address} onChange={(e) => setCustomerForm((c) => ({ ...c, address: e.target.value }))} placeholder="Address" />
+              </label>
               <div className="customer-entry-actions">
                 <button type="button" onClick={saveCustomer}>Save Customer</button>
                 <button type="button" className="ghost" onClick={() => setShowCustomerForm(false)}>Cancel</button>
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {stockSummaryDetailMode ? (
+        <div className="low-stock-modal" onClick={() => setStockSummaryDetailMode("")}>
+          <div className="low-stock-modal-card stock-summary-detail-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>
+                {stockSummaryDetailMode === "low"
+                  ? "Low Stock Details"
+                  : stockSummaryDetailMode === "out"
+                    ? "Out of Stock Details"
+                    : "Total Bundles Breakdown"}
+              </h3>
+              <button type="button" onClick={() => setStockSummaryDetailMode("")}>Close</button>
+            </div>
+            <p className="stock-summary-detail-note">
+              Based on the current filtered stock list. Review SKU and current units clearly before taking action.
+            </p>
+            <div className="stock-summary-detail-list">
+              {stockSummaryDetailRows.length ? stockSummaryDetailRows.map((item) => (
+                <article key={`stock-summary-${item.id}`} className="stock-summary-detail-row">
+                  <div className="stock-summary-detail-main">
+                    <strong>{item.name}</strong>
+                    <span>{item.sku || "-"}</span>
+                  </div>
+                  <div className="stock-summary-detail-side">
+                    <span>{stockSummaryDetailMode === "bundles" ? "Total Bundles" : "Current Units"}</span>
+                    <strong>{stockSummaryDetailMode === "bundles" ? Number(item.totalBundles || 0) : Number(item.stock || 0)}</strong>
+                  </div>
+                </article>
+              )) : (
+                <p className="stock-summary-detail-empty">No matching stock rows in the current filtered list.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {repOutstandingDetailRep ? (
+        <div className="low-stock-modal" onClick={() => setRepOutstandingDetailRep("")}>
+          <div className="low-stock-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>{repOutstandingDetailRep} Customer Outstanding</h3>
+              <div className="modal-head-actions">
+                <button
+                  type="button"
+                  className="receipt-print-action"
+                  onClick={() => printRepOutstandingCustomers({ rep: repOutstandingDetailRep, rows: repOutstandingDetailRows })}
+                >
+                  Print
+                </button>
+                <button type="button" onClick={() => setRepOutstandingDetailRep("")}>Close</button>
+              </div>
+            </div>
+            <div className="admin-table rep-outstanding-table" style={{ marginTop: "0.75rem" }}>
+              <header>
+                <span>Customer</span>
+                <span>Bills</span>
+                <span>Outstanding (LKR)</span>
+              </header>
+              {repOutstandingDetailRows.length ? repOutstandingDetailRows.map((row) => (
+                <article key={`rep-out-detail-${repOutstandingDetailRep}-${row.customerName}`}>
+                  <span>{row.customerName}</span>
+                  <span>{row.bills}</span>
+                  <span className="outstanding-text">{formatLkrValue(row.outstanding)}</span>
+                </article>
+              )) : <p>No outstanding customers for this rep in the selected range.</p>}
             </div>
           </div>
         </div>
@@ -5059,6 +5564,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               <article>
                 <span>Available Credit (LKR)</span>
                 <strong>{formatLkrValue(customerDetailData.availableCredit || 0)}</strong>
+              </article>
+              <article>
+                <span>Credit Limit (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.row.creditLimit || 0)}</strong>
+              </article>
+              <article>
+                <span>Discount Limit (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.row.discountLimit || 0)}</strong>
               </article>
               <article>
                 <span>Opening Outstanding (LKR)</span>
@@ -5431,6 +5944,52 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           </div>
         </div>
       ) : null}
+
+      {showCreditLimitAlertDetails ? (
+        <div className="low-stock-modal" onClick={() => setShowCreditLimitAlertDetails(false)}>
+          <div className="low-stock-modal-card cheque-alert-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Credit Limit Notifications</h3>
+              <button type="button" onClick={() => setShowCreditLimitAlertDetails(false)}>Close</button>
+            </div>
+            <p className="form-hint">
+              {creditLimitAlertSummary.count
+                ? `${creditLimitAlertSummary.count} customer${creditLimitAlertSummary.count === 1 ? "" : "s"} exceeded the assigned credit limit. Total over limit: LKR ${formatLkrValue(creditLimitAlertSummary.totalExceeded)}`
+                : "No customer is above the assigned credit limit."}
+            </p>
+            <div className="credit-limit-alert-list">
+              {creditLimitAlertSummary.rows.length ? creditLimitAlertSummary.rows.map((row) => (
+                <article className="credit-limit-alert-item" key={`credit-limit-alert-${row.customer}-${row.rep}`}>
+                  <div className="credit-limit-alert-head">
+                    <div>
+                      <h4>{row.customer}</h4>
+                      <p>{row.phone && row.phone !== "-" ? row.phone : "No phone number"}</p>
+                    </div>
+                    <div className="credit-limit-alert-tags">
+                      <span className="credit-limit-alert-rep">{row.rep && row.rep !== "-" ? row.rep : "No rep linked"}</span>
+                      <span className={`credit-limit-alert-days ${String(row.daysLabel || "").toLowerCase().includes("overdue") ? "is-overdue" : ""}`}>{row.daysLabel || "-"}</span>
+                    </div>
+                  </div>
+                  <div className="credit-limit-alert-metrics">
+                    <div>
+                      <span>Outstanding</span>
+                      <strong>LKR {formatLkrValue(row.outstanding)}</strong>
+                    </div>
+                    <div>
+                      <span>Credit Limit</span>
+                      <strong>LKR {formatLkrValue(row.creditLimit)}</strong>
+                    </div>
+                    <div className="credit-limit-alert-over">
+                      <span>Exceeded By</span>
+                      <strong>LKR {formatLkrValue(row.exceededBy)}</strong>
+                    </div>
+                  </div>
+                </article>
+              )) : <p className="credit-limit-alert-empty">No credit limit notifications right now.</p>}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
   );
 };
@@ -5492,17 +6051,21 @@ export const App = () => {
     () => cart.map((line) => ({ ...line, itemDiscount: lineItemDiscount(line), price: lineFinalPrice(line) })),
     [cart]
   );
-  const discountAmount = useMemo(() => {
-    const raw = Number(discountValue || 0);
-    if (!Number.isFinite(raw) || raw <= 0) return 0;
-    const subTotal = Number(effectiveCartLines.reduce((acc, line) => acc + (Number(line.price || 0) * Number(line.quantity || 0)), 0).toFixed(2));
-    if (discountMode === "percent") {
-      const clamped = Math.min(raw, 100);
-      return Number(((subTotal * clamped) / 100).toFixed(2));
-    }
-    return Number(raw.toFixed(2));
-  }, [effectiveCartLines, discountMode, discountValue]);
+  const discountAmount = useMemo(() => billDiscountValue(discountMode, discountValue, effectiveCartLines), [effectiveCartLines, discountMode, discountValue]);
   const totals = useMemo(() => calculateTotals({ lines: effectiveCartLines, taxRate, discount: discountAmount }), [effectiveCartLines, taxRate, discountAmount]);
+  const selectedBillingCustomer = useMemo(() => {
+    const key = String(customerName || "").trim().toLowerCase();
+    if (!key) return null;
+    const matches = (state.customers || []).filter((item) => String(item.name || "").trim().toLowerCase() === key);
+    if (!matches.length) return null;
+    return matches.reduce((merged, item) => ({
+      ...(merged || {}),
+      ...item,
+      discountLimit: Math.max(Number(merged?.discountLimit || 0), Number(item.discountLimit || 0))
+    }), null);
+  }, [customerName, state.customers]);
+  const selectedCustomerDiscountLimit = useMemo(() => Number(selectedBillingCustomer?.discountLimit || 0), [selectedBillingCustomer?.discountLimit]);
+  const cartDiscountTotal = useMemo(() => totalDiscountApplied({ lines: effectiveCartLines, billDiscount: discountAmount }), [effectiveCartLines, discountAmount]);
   const customerCreditMap = useMemo(() => {
     const map = new Map();
     for (const entry of (state.customerCredits || [])) {
@@ -5758,6 +6321,10 @@ export const App = () => {
         showErrorModal(`Selected lorry exceeds capacity. Only ${Math.max(0, LORRY_CAPACITY - pendingLoad)} items left.`);
         return;
       }
+      if (selectedCustomerDiscountLimit > 0 && cartDiscountTotal > selectedCustomerDiscountLimit) {
+        showErrorModal(`Customer discount limit is ${currency(selectedCustomerDiscountLimit)}. Current discount is ${currency(cartDiscountTotal)}.`);
+        return;
+      }
       const sale = await submitSale({
         requestId: createSaleRequestId(),
         cashier,
@@ -5831,10 +6398,12 @@ export const App = () => {
           chequeBank={chequeBank}
           setChequeBank={setChequeBank}
           discountMode={discountMode}
-        setDiscountMode={setDiscountMode}
+          setDiscountMode={setDiscountMode}
           discountValue={discountValue}
           setDiscountValue={setDiscountValue}
+          selectedCustomerDiscountLimit={selectedCustomerDiscountLimit}
           selectedCustomerAvailableCredit={selectedCustomerAvailableCredit}
+          cartDiscountTotal={cartDiscountTotal}
           customerCreditDraft={customerCreditDraft}
           setCustomerCreditDraft={setCustomerCreditDraft}
           appliedCustomerCredit={appliedCustomerCredit}

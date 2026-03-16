@@ -124,6 +124,26 @@ const applyCustomerCreditUsage = ({ credits = [], creditPayment = null, customer
   };
 };
 
+const resolveCustomerDiscountLimit = ({ customers = [], customerName = "" }) => {
+  const key = String(customerName || "").trim().toLowerCase();
+  if (!key || key === "walk-in") return 0;
+  return roundMoney(
+    (customers || [])
+      .filter((customer) => String(customer?.name || "").trim().toLowerCase() === key)
+      .reduce((max, customer) => Math.max(max, Number(customer?.discountLimit || 0)), 0)
+  );
+};
+
+const calculateSaleDiscountTotal = ({ lines = [], billDiscount = 0 }) => {
+  const lineDiscountTotal = roundMoney((lines || []).reduce((acc, line) => {
+    const base = Number(line?.basePrice || 0);
+    const price = Number(line?.price || 0);
+    const qty = Number(line?.quantity || 0);
+    return acc + (Math.max(0, base - price) * Math.max(0, qty));
+  }, 0));
+  return roundMoney(lineDiscountTotal + Math.max(0, Number(billDiscount || 0)));
+};
+
 const recalculateSaleFinancials = (sale) => {
   const payments = normalizeSalePayments(sale);
   const cashPayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cash");
@@ -474,8 +494,16 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
   const phone = String(body.phone || "").trim();
   const address = String(body.address || "").trim();
   const rawOpeningOutstanding = Number(body.openingOutstanding || 0);
+  const rawCreditLimit = Number(body.creditLimit || 0);
+  const rawDiscountLimit = Number(body.discountLimit || 0);
   const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
     ? roundMoney(rawOpeningOutstanding)
+    : 0;
+  const creditLimit = Number.isFinite(rawCreditLimit) && rawCreditLimit > 0
+    ? roundMoney(rawCreditLimit)
+    : 0;
+  const discountLimit = Number.isFinite(rawDiscountLimit) && rawDiscountLimit > 0
+    ? roundMoney(rawDiscountLimit)
     : 0;
   if (!name) {
     res.status(400).json({ message: "Customer name is required" });
@@ -492,6 +520,8 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
     phone,
     address,
     openingOutstanding,
+    creditLimit,
+    discountLimit,
     createdAt: new Date().toISOString()
   };
 
@@ -509,9 +539,19 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, 
   const { id } = req.params;
   const body = req.body || {};
   const hasOpeningOutstanding = Object.prototype.hasOwnProperty.call(body, "openingOutstanding");
+  const hasCreditLimit = Object.prototype.hasOwnProperty.call(body, "creditLimit");
+  const hasDiscountLimit = Object.prototype.hasOwnProperty.call(body, "discountLimit");
   const rawOpeningOutstanding = Number(body.openingOutstanding || 0);
+  const rawCreditLimit = Number(body.creditLimit || 0);
+  const rawDiscountLimit = Number(body.discountLimit || 0);
   const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
     ? roundMoney(rawOpeningOutstanding)
+    : 0;
+  const creditLimit = Number.isFinite(rawCreditLimit) && rawCreditLimit > 0
+    ? roundMoney(rawCreditLimit)
+    : 0;
+  const discountLimit = Number.isFinite(rawDiscountLimit) && rawDiscountLimit > 0
+    ? roundMoney(rawDiscountLimit)
     : 0;
 
   const next = updateState((state) => {
@@ -527,7 +567,9 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, 
       state.customers[idx] = {
         ...state.customers[idx],
         ...body,
-        ...(hasOpeningOutstanding ? { openingOutstanding } : {})
+        ...(hasOpeningOutstanding ? { openingOutstanding } : {}),
+        ...(hasCreditLimit ? { creditLimit } : {}),
+        ...(hasDiscountLimit ? { discountLimit } : {})
       };
     }
     return state;
@@ -713,6 +755,12 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
   });
 
   const preparedCustomerName = String(prepared.customerName || "").trim();
+  const customerDiscountLimit = resolveCustomerDiscountLimit({ customers: state.customers || [], customerName: preparedCustomerName });
+  const totalDiscountApplied = calculateSaleDiscountTotal({ lines: prepared.lines, billDiscount: prepared.discountAmount ?? prepared.discount ?? 0 });
+  if (String(req.user?.role || "").toLowerCase() === "cashier" && customerDiscountLimit > 0 && totalDiscountApplied > customerDiscountLimit) {
+    res.status(409).json({ message: `Discount limit exceeded for ${preparedCustomerName}. Allowed: ${customerDiscountLimit.toFixed(2)}` });
+    return;
+  }
   if (customerCreditAmount > 0) {
     if (!preparedCustomerName || preparedCustomerName.toLowerCase() === "walk-in") {
       res.status(409).json({ message: "Customer credit can be used only for saved customers" });
@@ -916,6 +964,12 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
   const editSubTotal = roundMoney(preparedLines.reduce((acc, line) => acc + (Number(line.price || 0) * Number(line.quantity || 0)), 0));
   if (nextBillDiscount > editSubTotal) {
     res.status(409).json({ message: `Total bill discount cannot exceed subtotal (${editSubTotal.toFixed(2)})` });
+    return;
+  }
+  const customerDiscountLimit = resolveCustomerDiscountLimit({ customers: state.customers || [], customerName: sale.customerName });
+  const totalDiscountApplied = calculateSaleDiscountTotal({ lines: preparedLines, billDiscount: nextBillDiscount });
+  if (!isAdmin && customerDiscountLimit > 0 && totalDiscountApplied > customerDiscountLimit) {
+    res.status(409).json({ message: `Discount limit exceeded for ${sale.customerName}. Allowed: ${customerDiscountLimit.toFixed(2)}` });
     return;
   }
 
