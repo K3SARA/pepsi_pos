@@ -38,7 +38,7 @@ const parseDurationMs = (value) => {
 const refreshTtlMs = parseDurationMs(REFRESH_TOKEN_EXPIRES_IN);
 
 const baselineUserSpecs = [
-  { id: "user-admin", role: "admin", username: "admin", name: "Admin User", password: "admin123" },
+  { id: "user-admin", role: "admin", username: "admin", name: "Admin User", password: "Theekshana6087" },
   { id: "user-rep-1", role: "cashier", username: "rep1", name: "Rep 1", password: "rep123" },
   { id: "user-rep-2", role: "cashier", username: "rep2", name: "Rep 2", password: "rep123" },
   { id: "user-rep-3", role: "cashier", username: "rep3", name: "Rep 3", password: "rep123" },
@@ -277,7 +277,7 @@ export const createAuthUser = async ({ username, password, name, role = "cashier
   if (!cleanUsername || !cleanPassword || !cleanName) {
     throw new Error("name, username and password are required");
   }
-  if (!["admin", "cashier"].includes(cleanRole)) {
+  if (!["admin", "cashier", "manager"].includes(cleanRole)) {
     throw new Error("Invalid auth role");
   }
   if (cleanPassword.length < 4) {

@@ -185,3 +185,9 @@ export const resetLorryCount = () =>
   request("/settings/lorry-count-reset", {
     method: "POST"
   });
+
+export const setLoadingRowMark = (payload) =>
+  request("/settings/loading-row-mark", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });

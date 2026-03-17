@@ -20,6 +20,9 @@ import {
   verifyAccessToken
 } from "./auth.js";
 
+const BASE_LORRIES = ["Lorry A", "Lorry B"];
+const ORDER_LORRIES = ["Lorry A", "Lorry A Overflow", "Lorry B", "Lorry B Overflow"];
+
 const normalizeSalePayments = (sale) => {
   const explicit = Array.isArray(sale?.payments) ? sale.payments : [];
   if (explicit.length) return explicit;
@@ -488,7 +491,7 @@ app.get("/customers", requireAuth, requireRole("admin"), (_req, res) => {
   res.json(getState().customers || []);
 });
 
-app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) => {
+app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), (req, res) => {
   const body = req.body || {};
   const name = String(body.name || "").trim();
   const phone = String(body.phone || "").trim();
@@ -514,14 +517,15 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
     return;
   }
 
+  const isFinancialAdmin = ["admin"].includes(String(req.user?.role || "").toLowerCase());
   const record = {
     id: nanoid(12),
     name,
     phone,
     address,
-    openingOutstanding,
-    creditLimit,
-    discountLimit,
+    openingOutstanding: isFinancialAdmin ? openingOutstanding : 0,
+    creditLimit: isFinancialAdmin ? creditLimit : 0,
+    discountLimit: isFinancialAdmin ? discountLimit : 0,
     createdAt: new Date().toISOString()
   };
 
@@ -535,7 +539,7 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier"), (req, res) 
   res.status(201).json(record);
 });
 
-app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, res) => {
+app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manager"), (req, res) => {
   const { id } = req.params;
   const body = req.body || {};
   const hasOpeningOutstanding = Object.prototype.hasOwnProperty.call(body, "openingOutstanding");
@@ -563,6 +567,13 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, 
         ...state.customers[idx],
         phone: String(body.phone || "").trim()
       };
+    } else if (req.user?.role === "manager") {
+      state.customers[idx] = {
+        ...state.customers[idx],
+        name: body.name !== undefined ? String(body.name || "").trim() : state.customers[idx].name,
+        phone: body.phone !== undefined ? String(body.phone || "").trim() : state.customers[idx].phone,
+        address: body.address !== undefined ? String(body.address || "").trim() : state.customers[idx].address
+      };
     } else {
       state.customers[idx] = {
         ...state.customers[idx],
@@ -585,7 +596,7 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier"), (req, 
   res.json(updated);
 });
 
-app.post("/settings/lorry-count-reset", requireAuth, requireRole("admin"), (req, res) => {
+app.post("/settings/lorry-count-reset", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const now = new Date().toISOString();
   const next = updateState((state) => {
     state.settings = state.settings || {};
@@ -600,7 +611,33 @@ app.post("/settings/lorry-count-reset", requireAuth, requireRole("admin"), (req,
   res.json(next.settings?.lorryCountResetAt || {});
 });
 
-app.get("/staff", requireAuth, requireRole("admin"), (_req, res) => {
+app.post("/settings/loading-row-mark", requireAuth, requireRole("admin", "manager"), (req, res) => {
+  const markKey = String(req.body?.markKey || "").trim();
+  const loaded = Boolean(req.body?.loaded);
+  if (!markKey) {
+    res.status(400).json({ message: "Loading mark key is required" });
+    return;
+  }
+  const next = updateState((state) => {
+    state.settings = state.settings || {};
+    state.settings.loadingRowMarks = state.settings.loadingRowMarks || {};
+    if (loaded) {
+      state.settings.loadingRowMarks[markKey] = {
+        loaded: true,
+        updatedAt: new Date().toISOString(),
+        updatedBy: req.user?.username || "admin"
+      };
+    } else {
+      delete state.settings.loadingRowMarks[markKey];
+    }
+    return state;
+  });
+
+  sendFullSync();
+  res.json(next.settings?.loadingRowMarks || {});
+});
+
+app.get("/staff", requireAuth, requireRole("admin", "manager"), (_req, res) => {
   res.json(getState().staff || []);
 });
 
@@ -674,7 +711,7 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
     res.status(400).json({ message: "customerCreditAmount must be 0 or more" });
     return;
   }
-  if (!["Lorry A", "Lorry B"].includes(lorry)) {
+  if (!ORDER_LORRIES.includes(lorry)) {
     res.status(400).json({ message: "Lorry selection is required" });
     return;
   }
@@ -865,7 +902,7 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
   res.status(201).json(prepared);
 });
 
-app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res) => {
+app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin", "manager"), (req, res) => {
   const { id } = req.params;
   const body = req.body || {};
   const lines = Array.isArray(body.lines) ? body.lines : [];
@@ -885,7 +922,7 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
 
   const saleCashier = String(sale.cashier || "").trim().toLowerCase();
   const actingUser = String(req.user?.username || "").trim().toLowerCase();
-  const isAdmin = String(req.user?.role || "").toLowerCase() === "admin";
+  const isAdmin = ["admin", "manager"].includes(String(req.user?.role || "").toLowerCase());
   if (!isAdmin && (!saleCashier || saleCashier !== actingUser)) {
     res.status(403).json({ message: "Only the rep who created this sale can edit it" });
     return;
@@ -1057,7 +1094,7 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin"), (req, res)
   res.json(recalculated);
 });
 
-app.delete("/sales/:id", requireAuth, requireRole("admin", "cashier"), (req, res) => {
+app.delete("/sales/:id", requireAuth, requireRole("admin", "cashier", "manager"), (req, res) => {
   const { id } = req.params;
   const state = getState();
   const sale = (state.sales || []).find((item) => String(item.id) === String(id));
@@ -1254,7 +1291,7 @@ app.post("/returns", requireAuth, requireRole("cashier", "admin"), (req, res) =>
   res.status(201).json(record);
 });
 
-app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin"), (req, res) => {
+app.post("/sales/:id/delivery-adjust", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { id } = req.params;
   const body = req.body || {};
   const incomingLines = Array.isArray(body.lines) ? body.lines : [];

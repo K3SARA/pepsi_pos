@@ -1236,7 +1236,7 @@ button:disabled {
 
 .loading-table header,
 .loading-table article {
-  grid-template-columns: 1fr 0.76fr 0.58fr 0.86fr 0.52fr 0.52fr 0.58fr 0.86fr;
+  grid-template-columns: 0.92fr 0.72fr 0.54fr 0.82fr 0.48fr 0.48fr 0.54fr 0.82fr 0.9fr;
 }
 
 .deliveries-table header,
@@ -2948,6 +2948,11 @@ button:disabled {
   box-shadow: 0 7px 14px rgba(16, 35, 58, 0.08);
 }
 
+.loading-table article.is-loaded {
+  border-color: #b8dfbf;
+  background: linear-gradient(180deg, #f4fff4 0%, #e8f7e9 100%);
+}
+
 .loading-table article:nth-child(even) {
   background: #f9fbff;
 }
@@ -2961,7 +2966,8 @@ button:disabled {
 .loading-table .loading-col-ordered-qty,
 .loading-table .loading-col-bundles,
 .loading-table .loading-col-singles,
-.loading-table .loading-col-delivered-qty {
+.loading-table .loading-col-delivered-qty,
+.loading-table .loading-col-status {
   justify-self: center;
   text-align: center;
 }
@@ -2976,6 +2982,28 @@ button:disabled {
 .loading-table article .loading-col-item {
   font-weight: 700;
   color: #182c45;
+}
+
+.loading-mark-btn {
+  min-width: 92px;
+  border-radius: 999px;
+  padding: 0.38rem 0.62rem;
+  font-size: 0.74rem;
+  font-weight: 800;
+  background: #eef4fb;
+  color: #23415f;
+  border: 1px solid #c8d7e8;
+}
+
+.loading-mark-btn.is-loaded {
+  background: #dff3df;
+  color: #1d6b2c;
+  border-color: #9fceaa;
+}
+
+.loading-summary-status {
+  border-color: #cfe3cf !important;
+  background: linear-gradient(180deg, #f7fff7 0%, #ecf9ec 100%) !important;
 }
 
 .admin-customers-panel h2 {
@@ -4118,6 +4146,11 @@ button:disabled {
 
 .customer-entry-field-full {
   grid-column: 1 / -1;
+}
+
+.customer-form-lock-note {
+  grid-column: 1 / -1;
+  margin: -0.1rem 0 0.2rem;
 }
 
 .customer-entry-grid input,
@@ -5543,7 +5576,7 @@ button:disabled {
 
   .loading-table header,
   .loading-table article {
-    grid-template-columns: 0.94fr 0.7fr 0.48fr 0.74fr 0.44fr 0.44fr 0.5fr 0.74fr;
+    grid-template-columns: 0.88fr 0.66fr 0.42fr 0.7fr 0.4fr 0.4fr 0.44fr 0.7fr 0.84fr;
   }
 
   .loadings-page {
@@ -5610,7 +5643,8 @@ button:disabled {
   .loading-table .loading-col-ordered-qty,
   .loading-table .loading-col-bundles,
   .loading-table .loading-col-singles,
-  .loading-table .loading-col-delivered-qty {
+  .loading-table .loading-col-delivered-qty,
+  .loading-table .loading-col-status {
     justify-self: center !important;
     text-align: center !important;
     font-size: 0.68rem;
@@ -5621,6 +5655,13 @@ button:disabled {
     justify-self: end !important;
     text-align: right !important;
     font-size: 0.68rem;
+  }
+
+  .loading-mark-btn {
+    min-width: 0;
+    width: 100%;
+    padding: 0.34rem 0.24rem;
+    font-size: 0.62rem;
   }
 
   .deliveries-table header,
