@@ -1222,6 +1222,31 @@ button:disabled {
   grid-template-columns: 1.1fr 0.9fr 0.6fr 0.9fr 0.9fr;
 }
 
+.staff-table header,
+.staff-table article {
+  grid-template-columns: 1.05fr 0.85fr 0.8fr 0.5fr 0.9fr 0.7fr;
+}
+
+.staff-row-action {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.danger-inline {
+  border: 1px solid rgba(186, 48, 48, 0.24);
+  background: linear-gradient(180deg, rgba(215, 65, 65, 0.12), rgba(215, 65, 65, 0.18));
+  color: #b22222;
+  border-radius: 999px;
+  padding: 0.42rem 0.8rem;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.danger-inline:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .item-wise-table header,
 .item-wise-table article {
   grid-template-columns: 1.2fr 0.9fr 0.7fr 0.7fr 0.7fr;
@@ -5508,6 +5533,11 @@ button:disabled {
   .customer-table header,
   .customer-table article {
     grid-template-columns: 1fr 0.7fr 0.5fr 0.7fr 0.7fr;
+  }
+
+  .staff-table header,
+  .staff-table article {
+    grid-template-columns: 1fr 0.78fr 0.72fr 0.44fr 0.8fr 0.66fr;
   }
 
   .admin-table.customers-table header,

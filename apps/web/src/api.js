@@ -105,10 +105,20 @@ export const logoutApi = () =>
   }).catch(() => ({ ok: true }));
 
 export const fetchMe = () => request("/auth/me");
+export const fetchAuthUsers = () => request("/auth/users");
 export const createAuthUser = (payload) =>
   request("/auth/users", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+export const updateAuthUser = (id, payload) =>
+  request(`/auth/users/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload)
+  });
+export const deleteAuthUser = (id) =>
+  request(`/auth/users/${id}`, {
+    method: "DELETE"
   });
 export const fetchState = () => request("/state");
 export const fetchDashboard = () => request("/dashboard");
@@ -179,6 +189,10 @@ export const updateStaff = (id, payload) =>
   request(`/staff/${id}`, {
     method: "PATCH",
     body: JSON.stringify(payload)
+  });
+export const deleteStaff = (id) =>
+  request(`/staff/${id}`, {
+    method: "DELETE"
   });
 
 export const resetLorryCount = () =>

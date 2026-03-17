@@ -307,6 +307,70 @@ export const createAuthUser = async ({ username, password, name, role = "cashier
   return sanitizeUser(nextUser);
 };
 
+export const updateAuthUser = async (id, { name, role, password } = {}) => {
+  const targetId = String(id || "").trim();
+  if (!targetId) {
+    throw new Error("User id is required");
+  }
+
+  const cleanName = name !== undefined ? String(name || "").trim() : undefined;
+  const cleanRole = role !== undefined ? String(role || "").trim().toLowerCase() : undefined;
+  const cleanPassword = password !== undefined ? String(password || "") : undefined;
+
+  if (cleanRole !== undefined && !["admin", "cashier", "manager"].includes(cleanRole)) {
+    throw new Error("Invalid auth role");
+  }
+  if (cleanPassword !== undefined && cleanPassword && cleanPassword.length < 4) {
+    throw new Error("Password must be at least 4 characters");
+  }
+
+  let updatedUser = null;
+  updateAuthState((state) => {
+    const user = state.users.find((item) => String(item.id || "") === targetId);
+    if (!user) return state;
+    if (cleanName !== undefined) user.name = cleanName;
+    if (cleanRole !== undefined) user.role = cleanRole;
+    if (cleanPassword !== undefined && cleanPassword) {
+      user.passwordHash = bcrypt.hashSync(cleanPassword, BCRYPT_ROUNDS);
+    }
+    updatedUser = sanitizeUser(user);
+    return state;
+  });
+
+  if (!updatedUser) {
+    throw new Error("User not found");
+  }
+
+  return updatedUser;
+};
+
+export const deleteAuthUser = async (id, actingUserId = "") => {
+  const targetId = String(id || "").trim();
+  const actorId = String(actingUserId || "").trim();
+  if (!targetId) {
+    throw new Error("User id is required");
+  }
+  if (actorId && actorId === targetId) {
+    throw new Error("You cannot delete your own login");
+  }
+
+  let removedUser = null;
+  updateAuthState((state) => {
+    const idx = state.users.findIndex((item) => String(item.id || "") === targetId);
+    if (idx === -1) return state;
+    removedUser = sanitizeUser(state.users[idx]);
+    state.users.splice(idx, 1);
+    state.refreshTokens = (state.refreshTokens || []).filter((token) => String(token.userId || "") !== targetId);
+    return state;
+  });
+
+  if (!removedUser) {
+    throw new Error("User not found");
+  }
+
+  return removedUser;
+};
+
 export const getAuthStoreMeta = () => ({
   mode: USE_POSTGRES ? "postgres" : "file",
   authFile: AUTH_FILE,

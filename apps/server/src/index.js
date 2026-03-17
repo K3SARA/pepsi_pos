@@ -9,6 +9,7 @@ import { enrichSale } from "./seed.js";
 import { getState, getStoreMeta, updateState } from "./store.js";
 import {
   createAuthUser,
+  deleteAuthUser,
   extractSocketToken,
   getAuthStoreMeta,
   listUsers,
@@ -17,6 +18,7 @@ import {
   requireRole,
   revokeRefreshToken,
   rotateRefreshToken,
+  updateAuthUser,
   verifyAccessToken
 } from "./auth.js";
 
@@ -356,6 +358,28 @@ app.post("/auth/users", requireAuth, requireRole("admin"), async (req, res) => {
   }
 });
 
+app.patch("/auth/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const user = await updateAuthUser(req.params.id, req.body || {});
+    res.json(user);
+  } catch (error) {
+    const message = error.message || "Unable to update user";
+    const status = /not found/i.test(message) ? 404 : 400;
+    res.status(status).json({ message });
+  }
+});
+
+app.delete("/auth/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  try {
+    const user = await deleteAuthUser(req.params.id, req.user?.id || "");
+    res.json(user);
+  } catch (error) {
+    const message = error.message || "Unable to delete user";
+    const status = /not found/i.test(message) ? 404 : 400;
+    res.status(status).json({ message });
+  }
+});
+
 app.get("/state", requireAuth, (_req, res) => {
   const state = getState();
   res.json({
@@ -686,6 +710,24 @@ app.patch("/staff/:id", requireAuth, requireRole("admin"), (req, res) => {
 
   sendFullSync();
   res.json(updated);
+});
+
+app.delete("/staff/:id", requireAuth, requireRole("admin"), (req, res) => {
+  const { id } = req.params;
+  const next = updateState((state) => {
+    state.staff = state.staff || [];
+    state.staff = state.staff.filter((item) => String(item.id || "") !== String(id || ""));
+    return state;
+  });
+
+  const exists = (next.staff || []).some((item) => String(item.id || "") === String(id || ""));
+  if (exists) {
+    res.status(400).json({ message: "Unable to delete staff" });
+    return;
+  }
+
+  sendFullSync();
+  res.json({ ok: true });
 });
 
 app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {

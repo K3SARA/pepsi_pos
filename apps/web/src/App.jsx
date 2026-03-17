@@ -4,10 +4,13 @@ import { calculateTotals, PAYMENT_TYPES, SOCKET_EVENTS } from "@pepsi/shared";
 import {
   clearAuthSession,
   createAuthUser,
+  fetchAuthUsers,
   createCustomer,
   createProduct,
   createStaff,
+  deleteAuthUser,
   deleteSale,
+  deleteStaff,
   deleteProduct,
   fetchDashboard,
   fetchMe,
@@ -24,6 +27,7 @@ import {
   submitReturn,
   submitSale,
   updateCustomer,
+  updateAuthUser,
   updateStaff,
   resetLorryCount,
   setLoadingRowMark
@@ -85,6 +89,16 @@ const getBundleSize = (item) => {
   if (isWater && sizeMl === 1500) return 12;
   if (isWater && sizeMl === 500) return 24;
   return BUNDLE_BY_SIZE_ML[sizeMl] || 0;
+};
+
+const bundleRuleLabel = (item) => {
+  const name = String(item?.name || item || "").toLowerCase();
+  const category = String(item?.category || "").toLowerCase();
+  const sizeMl = extractSizeMl(item?.size || name);
+  const bundleSize = getBundleSize(item);
+  const isWater = name.includes("water") || category.includes("water") || name.includes("aquafina");
+  if (!sizeMl || !bundleSize) return "";
+  return `${isWater ? "Water " : ""}${sizeMl} ml = ${bundleSize} per bundle`;
 };
 
 const productDisplayName = (product) => {
@@ -438,7 +452,8 @@ const openSaleReceiptPrint = ({
         originalQty,
         bundles,
         singles,
-        bundleSize
+        bundleSize,
+        bundleRule: bundleRuleLabel(bundleSource)
       };
     }).filter((line) => line.qty > 0 || line.total > 0);
 
@@ -467,6 +482,7 @@ const openSaleReceiptPrint = ({
   const summaryRowsHtml = summaryRows
     .map((row) => `<div class="summary-row ${row.tone === "deduction" ? "is-deduction" : ""}"><span>${escapeHtml(row.label)}</span><strong>${row.value < 0 ? "- " : ""}LKR ${toMoney(Math.abs(row.value))}</strong></div>`)
     .join("");
+  const bundleGuideText = [...new Set(lines.map((line) => String(line.bundleRule || "").trim()).filter(Boolean))].join(" | ");
 
   const printWindow = window.open("", "_blank", "width=1000,height=1300");
   if (!printWindow) {
@@ -503,6 +519,8 @@ const openSaleReceiptPrint = ({
   .summary-total strong { font-size: 28px; color: #0b203a; line-height: 1; }
   .payment-line { margin-top: 10px; padding: 10px 12px; border-radius: 12px; background: rgba(255,255,255,0.72); border: 1px solid rgba(97,122,156,0.2); font-size: 14px; font-weight: 800; color: #23364f; }
   .payment-line span { display: block; font-size: 11px; font-weight: 900; letter-spacing: 0.08em; text-transform: uppercase; color: #5f738f; margin-bottom: 3px; }
+  .bundle-guide-line { margin-top: 14px; padding: 9px 12px; border: 1px solid rgba(57,80,108,0.18); border-radius: 12px; background: rgba(242,247,253,0.78); font-size: 13px; line-height: 1.45; color: #28476d; }
+  .bundle-guide-line span { font-weight: 900; text-transform: uppercase; letter-spacing: 0.06em; font-size: 11px; color: #48617f; margin-right: 8px; }
   .notes { margin-top: 16px; font-size: 18px; font-weight: 600; line-height: 1.45; }
 .notes li { margin-bottom: 3px; } .signatures { margin-top: 70px; display: grid; grid-template-columns: 1fr 1fr; gap: 30px; text-align: center; font-size: 18px; }
 .sign-line { margin-bottom: 8px; letter-spacing: 2px; } .powered { text-align: center; margin-top: 80px; font-size: 20px; }
@@ -510,6 +528,7 @@ const openSaleReceiptPrint = ({
 <div class="header"><div class="logo-wrap"><img src="/invoice-pepsi.png" alt="Pepsi logo" /></div><div><div class="brand-title">M.W.M.B CHANDRASEKARA<br/>MATALE DISTRIBUTOR</div><div class="brand-sub">Tenna - Matale. Tel : 076-0470123</div></div></div>
 <div class="meta"><div class="meta-box"></div><div class="meta-grid"><div>Name : <span class="dots">${escapeHtml(pickedCustomer)}</span></div><div>Date : <span class="dots">${escapeHtml(dateLabel)}</span></div><div>Address : <span class="dots">${escapeHtml(customer?.address || "-")}</span></div><div>Tel : <span class="dots">${escapeHtml(printedCustomerPhone)}</span></div><div>Rep : <span class="dots">${escapeHtml(sale?.cashier || "-")}</span></div><div>Invoice No : <span class="dots invoice-dots">${escapeHtml(sale?.id || "-")}</span></div><div>Lorry : <span class="dots">${escapeHtml(sale?.lorry || "-")}</span></div><div></div></div></div>
 <table><thead><tr><th>Item Code</th><th>Qty</th><th>Billing Price</th><th>Item Discount</th><th>Total</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+${bundleGuideText ? `<div class="bundle-guide-line"><span>Bundle Count</span>${escapeHtml(bundleGuideText)}</div>` : ""}
  <div class="totals-grid"><div class="totals-box"><div class="totals-title">Empty Summary</div><div class="summary-row"><span>Empty Issue</span><strong>-</strong></div><div class="summary-row"><span>Empty Received</span><strong>-</strong></div></div><div class="summary-box"><div class="totals-title">Receipt Summary</div>${summaryRowsHtml}<div class="summary-total"><span>Total Value</span><strong>LKR ${toMoney(printedTotal)}</strong></div><div class="payment-line"><span>Payment</span>${escapeHtml(paymentDisplay.label)}${paymentDisplay.detail ? ` (${escapeHtml(paymentDisplay.detail)})` : ""}</div></div></div>
 <ul class="notes"><li>Return or exchange only with this receipt</li><li>Credit Payment for all goods shall be made No later than 14 days</li></ul>
 <div class="signatures"><div><div class="sign-line">.......................................</div><div>Customer Signature</div><div>Rubber Stamp</div></div><div><div class="sign-line">.......................................</div><div>P.S.R Signature</div></div></div>
@@ -625,7 +644,7 @@ const CashierView = ({
     savingCheckout,
     checkout
   }) => {
-  const LORRY_CAPACITY = 1875;
+  const LORRY_CAPACITY = 2880;
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) return state.products;
@@ -1965,7 +1984,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [notice, setNotice] = useState("");
 
   const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "" });
-  const [staffForm, setStaffForm] = useState({ id: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
+  const [staffForm, setStaffForm] = useState({ id: "", authUserId: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
   const [stockMode, setStockMode] = useState("add");
   const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
   const [stockSearch, setStockSearch] = useState("");
@@ -1999,6 +2018,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [stockSummaryDetailMode, setStockSummaryDetailMode] = useState("");
   const [tableSort, setTableSort] = useState({});
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [authUsers, setAuthUsers] = useState([]);
   const isManager = String(user?.role || "").toLowerCase() === "manager";
   const canManageStock = !isManager;
   const canManageCustomerFinancials = !isManager;
@@ -2015,6 +2035,16 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   useEffect(() => {
     setMobileNavOpen(false);
   }, [activePage]);
+
+  useEffect(() => {
+    if (!canManageUsers) {
+      setAuthUsers([]);
+      return;
+    }
+    fetchAuthUsers()
+      .then((rows) => setAuthUsers(Array.isArray(rows) ? rows : []))
+      .catch(() => setAuthUsers([]));
+  }, [canManageUsers, state.staff]);
 
   const inDateRange = (iso, from, to) => {
     const day = String(iso || "").slice(0, 10);
@@ -2659,23 +2689,38 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
   const staffRows = useMemo(() => {
     const map = new Map();
+    const keyForName = (value) => String(value || "").trim().toLowerCase();
     for (const sale of state.sales) {
-      const key = sale.cashier || "Unknown";
-      const existing = map.get(key) || { name: key, orders: 0, revenue: 0, role: "", phone: "" };
+      const name = sale.cashier || "Unknown";
+      const key = keyForName(name);
+      const existing = map.get(key) || { name, orders: 0, revenue: 0, role: "", phone: "", username: "", authRole: "", authUserId: "", staffId: "" };
       existing.orders += 1;
       existing.revenue += saleNetTotal(sale);
       map.set(key, existing);
     }
     for (const member of (state.staff || [])) {
-      const existing = map.get(member.name) || { name: member.name, orders: 0, revenue: 0 };
-      map.set(member.name, { ...existing, ...member });
+      const key = keyForName(member.name);
+      const existing = map.get(key) || { name: member.name, orders: 0, revenue: 0, username: "", authRole: "", authUserId: "" };
+      map.set(key, { ...existing, ...member, staffId: member.id });
+    }
+    for (const authUser of (authUsers || [])) {
+      const key = keyForName(authUser.name || authUser.username);
+      const existing = map.get(key) || { name: authUser.name || authUser.username, orders: 0, revenue: 0, role: "", phone: "", staffId: "" };
+      map.set(key, {
+        ...existing,
+        name: authUser.name || existing.name,
+        username: authUser.username || existing.username || "",
+        authRole: authUser.role || existing.authRole || "",
+        authUserId: authUser.id || existing.authUserId || ""
+      });
     }
     return [...map.values()].sort((a, b) => b.revenue - a.revenue);
-  }, [state.sales, state.staff]);
+  }, [state.sales, state.staff, authUsers]);
   const sortedStaffRows = useMemo(
     () => sortRows(staffRows, "staff", "name", {
       name: (row) => row.name,
-      role: (row) => row.role || "",
+      username: (row) => row.username || "",
+      role: (row) => row.authRole || row.role || "",
       orders: (row) => Number(row.orders || 0),
       revenue: (row) => Number(row.revenue || 0)
     }),
@@ -3570,7 +3615,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       setNotice("Manager access cannot create or edit users.");
       return;
     }
-    setStaffForm({ id: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
+    setStaffForm({ id: "", authUserId: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
     setShowStaffForm(true);
   };
 
@@ -3580,21 +3625,30 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       return;
     }
     if (!row) return;
-    const matched = (state.staff || []).find(
-      (item) => String(item.name || "").trim().toLowerCase() === String(row.name || "").trim().toLowerCase()
-    );
-    if (!matched) {
-      setNotice("Selected staff was not found in saved staff list.");
+    const matched = (state.staff || []).find((item) => String(item.id || "") === String(row.staffId || ""))
+      || (state.staff || []).find(
+        (item) => String(item.name || "").trim().toLowerCase() === String(row.name || "").trim().toLowerCase()
+      );
+    const matchedAuth = (authUsers || []).find((item) => String(item.id || "") === String(row.authUserId || ""))
+      || (authUsers || []).find(
+        (item) => String(item.username || "").trim().toLowerCase() === String(row.username || "").trim().toLowerCase()
+      )
+      || (authUsers || []).find(
+        (item) => String(item.name || "").trim().toLowerCase() === String(row.name || "").trim().toLowerCase()
+      );
+    if (!matched && !matchedAuth) {
+      setNotice("Selected user was not found.");
       return;
     }
     setStaffForm({
-      id: matched.id,
-      name: matched.name || row.name || "",
-      role: matched.role || row.role || "",
-      phone: matched.phone || row.phone || "",
-      username: "",
+      id: matched?.id || "",
+      authUserId: matchedAuth?.id || "",
+      name: matchedAuth?.name || matched?.name || row.name || "",
+      role: matched?.role || row.role || "",
+      phone: matched?.phone || row.phone || "",
+      username: matchedAuth?.username || row.username || "",
       password: "",
-      authRole: "cashier"
+      authRole: matchedAuth?.role || row.authRole || "cashier"
     });
     setShowStaffForm(true);
   };
@@ -3619,23 +3673,82 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       }
     }
     const payload = { name: staffForm.name.trim(), role: staffForm.role, phone: staffForm.phone };
-    const action = staffForm.id
-      ? updateStaff(staffForm.id, payload)
-      : Promise.all([
-        createStaff(payload),
-        createAuthUser({
+    const isEdit = Boolean(staffForm.id || staffForm.authUserId);
+    const actions = [];
+    if (isEdit) {
+      if (staffForm.id) {
+        actions.push(updateStaff(staffForm.id, payload));
+      } else if (String(staffForm.phone || "").trim() || String(staffForm.role || "").trim()) {
+        actions.push(createStaff(payload));
+      }
+      if (staffForm.authUserId) {
+        actions.push(updateAuthUser(staffForm.authUserId, {
           name: staffForm.name.trim(),
-          username: String(staffForm.username || "").trim(),
-          password: String(staffForm.password || ""),
-          role: staffForm.authRole || "cashier"
-        })
-      ]);
+          role: staffForm.authRole || "cashier",
+          password: String(staffForm.password || "").trim() || undefined
+        }));
+      }
+    } else {
+      actions.push(createStaff(payload));
+      actions.push(createAuthUser({
+        name: staffForm.name.trim(),
+        username: String(staffForm.username || "").trim(),
+        password: String(staffForm.password || ""),
+        role: staffForm.authRole || "cashier"
+      }));
+    }
+    const action = Promise.all(actions);
     action
       .then(() => {
         setShowStaffForm(false);
-        setNotice(staffForm.id ? "Staff saved." : "User created.");
+        if (canManageUsers) {
+          fetchAuthUsers().then((rows) => setAuthUsers(Array.isArray(rows) ? rows : [])).catch(() => {});
+        }
+        setNotice(isEdit ? "User saved." : "User created.");
       })
       .catch((error) => setNotice(error.message));
+  };
+
+  const deleteUserByRow = async (row) => {
+    if (!canManageUsers) {
+      setNotice("Manager access cannot create or edit users.");
+      return;
+    }
+    if (!row?.authUserId && !row?.staffId) {
+      setNotice("Selected user cannot be deleted.");
+      return;
+    }
+    if (String(row.authUserId || "") && String(row.authUserId || "") === String(user?.id || "")) {
+      setNotice("You cannot delete your own login.");
+      return;
+    }
+    const accepted = await requestConfirm({
+      title: "Delete User",
+      message: `Delete ${row.name || "this user"}? This removes the login and linked staff profile, but keeps historical sales records.`,
+      confirmLabel: "Delete User",
+      cancelLabel: "Cancel",
+      tone: "danger"
+    });
+    if (!accepted) return;
+
+    const actions = [];
+    if (row.authUserId) {
+      actions.push(deleteAuthUser(row.authUserId));
+    }
+    if (row.staffId) {
+      actions.push(deleteStaff(row.staffId));
+    }
+
+    try {
+      await Promise.all(actions);
+      if (canManageUsers) {
+        fetchAuthUsers().then((rows) => setAuthUsers(Array.isArray(rows) ? rows : [])).catch(() => {});
+      }
+      setShowStaffForm(false);
+      setNotice("User deleted.");
+    } catch (error) {
+      setNotice(error.message || "Unable to delete user.");
+    }
   };
 
   const handleResetLorryCount = async () => {
@@ -4688,7 +4801,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <input value={staffForm.name} onChange={(e) => setStaffForm((c) => ({ ...c, name: e.target.value }))} placeholder="Staff name" />
                   <input value={staffForm.role} onChange={(e) => setStaffForm((c) => ({ ...c, role: e.target.value }))} placeholder="Role" />
                   <input value={staffForm.phone} onChange={(e) => setStaffForm((c) => ({ ...c, phone: e.target.value }))} placeholder="Phone" />
-                  {!staffForm.id ? (
+                  {!staffForm.authUserId ? (
                     <>
                       <input value={staffForm.username} onChange={(e) => setStaffForm((c) => ({ ...c, username: e.target.value }))} placeholder="Username" />
                       <input type="password" value={staffForm.password} onChange={(e) => setStaffForm((c) => ({ ...c, password: e.target.value }))} placeholder="Password" />
@@ -4698,23 +4811,40 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                         <option value="admin">Admin Login</option>
                       </select>
                     </>
-                  ) : null}
+                  ) : (
+                    <>
+                      <input value={staffForm.username} disabled placeholder="Username" />
+                      <select value={staffForm.authRole} onChange={(e) => setStaffForm((c) => ({ ...c, authRole: e.target.value }))}>
+                        <option value="cashier">Cashier Login</option>
+                        <option value="manager">Manager Login</option>
+                        <option value="admin">Admin Login</option>
+                      </select>
+                      <input
+                        type="password"
+                        value={staffForm.password}
+                        onChange={(e) => setStaffForm((c) => ({ ...c, password: e.target.value }))}
+                        placeholder="New Password (leave blank to keep current)"
+                      />
+                    </>
+                  )}
                   <div>
                     <button type="button" onClick={saveStaff}>Save</button>
                     <button type="button" className="ghost" onClick={() => setShowStaffForm(false)}>Cancel</button>
                   </div>
                 </div>
               ) : null}
-              <div className="admin-table">
+              <div className="admin-table staff-table">
                 <header>
                   <button type="button" className="th-sort" onClick={() => toggleSort("staff", "name")}>Staff{sortMark("staff", "name")}</button>
-                  <button type="button" className="th-sort" onClick={() => toggleSort("staff", "role")}>Role{sortMark("staff", "role")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("staff", "username")}>Username{sortMark("staff", "username")}</button>
+                  <button type="button" className="th-sort" onClick={() => toggleSort("staff", "role")}>Access{sortMark("staff", "role")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("staff", "orders")}>Orders{sortMark("staff", "orders")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("staff", "revenue")}>Revenue{sortMark("staff", "revenue")}</button>
+                  <span>Action</span>
                 </header>
                 {sortedStaffRows.length ? sortedStaffRows.map((row) => (
                   <article
-                    key={row.name}
+                    key={`${row.authUserId || "auth-none"}-${row.staffId || "staff-none"}-${row.name}`}
                     className="staff-clickable-row"
                     role="button"
                     tabIndex={0}
@@ -4729,9 +4859,27 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     }}
                   >
                     <span>{row.name}</span>
-                    <span>{row.role || "-"}</span>
+                    <span>{row.username || "-"}</span>
+                    <span>{row.authRole || row.role || "-"}</span>
                     <span>{row.orders}</span>
                     <span>{currency(row.revenue)}</span>
+                    <span className="staff-row-action">
+                      {canManageUsers ? (
+                        <button
+                          type="button"
+                          className="danger-inline"
+                          disabled={String(row.authUserId || "") === String(user?.id || "")}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteUserByRow(row);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      ) : (
+                        "-"
+                      )}
+                    </span>
                   </article>
                 )) : <p>No staff sales records yet.</p>}
               </div>
@@ -6353,7 +6501,7 @@ export const App = () => {
     try {
       if (savingCheckout) return;
       setSavingCheckout(true);
-      const LORRY_CAPACITY = 1875;
+      const LORRY_CAPACITY = 2880;
       const matchedCustomer = (state.customers || []).find(
         (item) => String(item.name || "").trim().toLowerCase() === String(customerName || "").trim().toLowerCase()
       );
