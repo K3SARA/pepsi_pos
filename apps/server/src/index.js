@@ -541,15 +541,17 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
     return;
   }
 
-  const isFinancialAdmin = ["admin"].includes(String(req.user?.role || "").toLowerCase());
+  const role = String(req.user?.role || "").toLowerCase();
+  const canManageOpeningOutstanding = ["admin", "manager"].includes(role);
+  const canManageCustomerLimits = role === "admin";
   const record = {
     id: nanoid(12),
     name,
     phone,
     address,
-    openingOutstanding: isFinancialAdmin ? openingOutstanding : 0,
-    creditLimit: isFinancialAdmin ? creditLimit : 0,
-    discountLimit: isFinancialAdmin ? discountLimit : 0,
+    openingOutstanding: canManageOpeningOutstanding ? openingOutstanding : 0,
+    creditLimit: canManageCustomerLimits ? creditLimit : 0,
+    discountLimit: canManageCustomerLimits ? discountLimit : 0,
     createdAt: new Date().toISOString()
   };
 
@@ -596,7 +598,8 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
         ...state.customers[idx],
         name: body.name !== undefined ? String(body.name || "").trim() : state.customers[idx].name,
         phone: body.phone !== undefined ? String(body.phone || "").trim() : state.customers[idx].phone,
-        address: body.address !== undefined ? String(body.address || "").trim() : state.customers[idx].address
+        address: body.address !== undefined ? String(body.address || "").trim() : state.customers[idx].address,
+        ...(hasOpeningOutstanding ? { openingOutstanding } : {})
       };
     } else {
       state.customers[idx] = {

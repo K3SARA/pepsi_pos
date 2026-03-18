@@ -2021,7 +2021,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [authUsers, setAuthUsers] = useState([]);
   const isManager = String(user?.role || "").toLowerCase() === "manager";
   const canManageStock = !isManager;
-  const canManageCustomerFinancials = !isManager;
+  const canManageCustomerOpeningOutstanding = true;
+  const canManageCustomerLimits = !isManager;
   const canManageUsers = !isManager;
 
   useEffect(() => {
@@ -3596,8 +3597,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       phone: customerForm.phone,
       address: customerForm.address
     };
-    if (canManageCustomerFinancials) {
+    if (canManageCustomerOpeningOutstanding) {
       payload.openingOutstanding = Number(openingOutstanding.toFixed(2));
+    }
+    if (canManageCustomerLimits) {
       payload.creditLimit = Number(creditLimit.toFixed(2));
       payload.discountLimit = Number(discountLimit.toFixed(2));
     }
@@ -5625,7 +5628,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   value={customerForm.openingOutstanding}
                   onChange={(e) => setCustomerForm((c) => ({ ...c, openingOutstanding: e.target.value }))}
                   placeholder="Opening Outstanding (LKR)"
-                  disabled={!canManageCustomerFinancials}
+                  disabled={!canManageCustomerOpeningOutstanding}
                 />
               </label>
               <label className="customer-entry-field">
@@ -5637,7 +5640,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   value={customerForm.creditLimit}
                   onChange={(e) => setCustomerForm((c) => ({ ...c, creditLimit: e.target.value }))}
                   placeholder="Credit Limit (LKR)"
-                  disabled={!canManageCustomerFinancials}
+                  disabled={!canManageCustomerLimits}
                 />
               </label>
               <label className="customer-entry-field">
@@ -5649,11 +5652,11 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   value={customerForm.discountLimit}
                   onChange={(e) => setCustomerForm((c) => ({ ...c, discountLimit: e.target.value }))}
                   placeholder="Discount Limit (LKR)"
-                  disabled={!canManageCustomerFinancials}
+                  disabled={!canManageCustomerLimits}
                 />
               </label>
-              {!canManageCustomerFinancials ? (
-                <p className="form-hint customer-form-lock-note">Manager access can edit customer profile details, but not outstanding, credit limit, or discount limit.</p>
+              {!canManageCustomerLimits ? (
+                <p className="form-hint customer-form-lock-note">Manager access can edit opening outstanding and customer profile details, but not credit limit or discount limit.</p>
               ) : null}
               <label className="customer-entry-field customer-entry-field-full">
                 <span>Address</span>
