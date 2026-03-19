@@ -2021,6 +2021,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [authUsers, setAuthUsers] = useState([]);
   const isManager = String(user?.role || "").toLowerCase() === "manager";
   const canManageStock = !isManager;
+  const canEditStockInvoicePrice = ["admin", "manager"].includes(String(user?.role || "").toLowerCase());
   const canManageCustomerOpeningOutstanding = true;
   const canManageCustomerLimits = !isManager;
   const canManageUsers = !isManager;
@@ -3802,8 +3803,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   };
 
   const openStockEdit = () => {
-    if (!canManageStock) {
-      setNotice("Manager access cannot edit stock.");
+    if (!canEditStockInvoicePrice) {
+      setNotice("You do not have stock edit access.");
       return;
     }
     setStockMode("edit");
@@ -3820,8 +3821,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     };
 
   const openStockEditByRow = (row) => {
-    if (!canManageStock) {
-      setNotice("Manager access cannot edit stock.");
+    if (!canEditStockInvoicePrice) {
+      setNotice("You do not have stock edit access.");
       return;
     }
     if (!row) return;
@@ -4023,11 +4024,15 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
   const saveStock = async () => {
     try {
-        if (!canManageStock) {
-          setNotice("Manager access cannot edit stock.");
+        if (!canEditStockInvoicePrice) {
+          setNotice("You do not have stock edit access.");
           return;
         }
         const selected = state.products.find((item) => item.id === stockForm.productId);
+        if (isManager && stockMode !== "edit") {
+          setNotice("Manager access can edit invoice price only.");
+          return;
+        }
         if (stockMode === "add") {
           const qty = Number(stockForm.quantity || 0);
           const billingPrice = Number(newStockItemForm.billingPrice);
@@ -4071,20 +4076,30 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           });
           setNotice(`New item created: ${name}.`);
         }
-      } else {
-        if (!selected) {
+        } else {
+          if (!selected) {
           setNotice("Select a valid product.");
           return;
           }
-          await patchProduct(selected.id, {
-            stock: Number(stockForm.stock || selected.stock),
-            sku: String(stockForm.sku || selected.sku).trim(),
-            invoicePrice: Number(stockForm.invoicePrice || selected.invoicePrice || 0),
-            billingPrice: Number(stockForm.billingPrice || selected.billingPrice || selected.price || 0),
-            mrp: Number(stockForm.mrp || selected.mrp || selected.price || 0),
-            price: Number(stockForm.mrp || selected.mrp || selected.price || 0)
-          });
-        setNotice("Stock updated.");
+          if (isManager) {
+            const invoicePrice = Number(stockForm.invoicePrice || selected.invoicePrice || 0);
+            if (Number.isNaN(invoicePrice) || invoicePrice < 0) {
+              setNotice("Invoice price must be 0 or more.");
+              return;
+            }
+            await patchProduct(selected.id, { invoicePrice });
+            setNotice("Invoice price updated.");
+          } else {
+            await patchProduct(selected.id, {
+              stock: Number(stockForm.stock || selected.stock),
+              sku: String(stockForm.sku || selected.sku).trim(),
+              invoicePrice: Number(stockForm.invoicePrice || selected.invoicePrice || 0),
+              billingPrice: Number(stockForm.billingPrice || selected.billingPrice || selected.price || 0),
+              mrp: Number(stockForm.mrp || selected.mrp || selected.price || 0),
+              price: Number(stockForm.mrp || selected.mrp || selected.price || 0)
+            });
+            setNotice("Stock updated.");
+          }
       }
       setShowStockForm(false);
     } catch (error) {
@@ -4495,8 +4510,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               {showStockForm ? (
                 <div className="low-stock-modal" onClick={() => setShowStockForm(false)}>
                   <div className="low-stock-modal-card stock-entry-modal" onClick={(e) => e.stopPropagation()}>
-                    <div className="low-stock-modal-head">
-                      <h3>{stockMode === "add" ? "Stock Entry" : "Edit Stock"}</h3>
+                  <div className="low-stock-modal-head">
+                      <h3>{stockMode === "add" ? "Stock Entry" : (isManager ? "Edit Invoice Price" : "Edit Stock")}</h3>
                       <button type="button" className="ghost" onClick={() => setShowStockForm(false)}>Close</button>
                     </div>
                     <div className="admin-inline-form stock-form-panel">
@@ -4580,7 +4595,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                           </label>
                           <label className="stock-form-field">
                             <span>SKU</span>
-                            <input value={stockForm.sku || ""} onChange={(e) => setStockForm((c) => ({ ...c, sku: e.target.value }))} placeholder="Edit SKU" />
+                            <input value={stockForm.sku || ""} onChange={(e) => setStockForm((c) => ({ ...c, sku: e.target.value }))} placeholder="Edit SKU" disabled={isManager} />
                           </label>
                           <label className="stock-form-field">
                             <span>Invoice Price (LKR)</span>
@@ -4588,16 +4603,17 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                           </label>
                           <label className="stock-form-field">
                             <span>Billing Price (LKR)</span>
-                            <input type="number" step="0.01" value={stockForm.billingPrice || ""} onChange={(e) => setStockForm((c) => ({ ...c, billingPrice: e.target.value }))} placeholder="Billing Price" />
+                            <input type="number" step="0.01" value={stockForm.billingPrice || ""} onChange={(e) => setStockForm((c) => ({ ...c, billingPrice: e.target.value }))} placeholder="Billing Price" disabled={isManager} />
                           </label>
                           <label className="stock-form-field">
                             <span>MRP (LKR)</span>
-                            <input type="number" step="0.01" value={stockForm.mrp || ""} onChange={(e) => setStockForm((c) => ({ ...c, mrp: e.target.value }))} placeholder="MRP" />
+                            <input type="number" step="0.01" value={stockForm.mrp || ""} onChange={(e) => setStockForm((c) => ({ ...c, mrp: e.target.value }))} placeholder="MRP" disabled={isManager} />
                           </label>
                           <label className="stock-form-field">
                             <span>Stock</span>
-                            <input type="number" value={stockForm.stock} onChange={(e) => setStockForm((c) => ({ ...c, stock: e.target.value }))} placeholder="Set stock" />
+                            <input type="number" value={stockForm.stock} onChange={(e) => setStockForm((c) => ({ ...c, stock: e.target.value }))} placeholder="Set stock" disabled={isManager} />
                           </label>
+                          {isManager ? <p className="form-hint">Manager access can edit invoice price only.</p> : null}
                         </>
                       )}
                       <div>
@@ -4612,7 +4628,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 <h3>Current Stock</h3>
                 <div className="admin-page-actions stock-current-actions stock-actions-tech">
                   {canManageStock ? <button type="button" onClick={openStockAdd}>Add Stock</button> : null}
-                  {canManageStock ? <button type="button" onClick={openStockEdit}>Edit Stock</button> : null}
+                  {canEditStockInvoicePrice ? <button type="button" onClick={openStockEdit}>{isManager ? "Edit Invoice Price" : "Edit Stock"}</button> : null}
                   <button type="button" onClick={exportStockReport}>Export Stock</button>
                   {canManageStock ? <button type="button" onClick={() => stockFileRef.current?.click()}>Import Stock</button> : null}
                   <input
@@ -4729,10 +4745,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     role="button"
                     tabIndex={0}
                     onClick={() => {
-                      if (canManageStock) openStockEditByRow(item);
+                      if (canEditStockInvoicePrice) openStockEditByRow(item);
                     }}
                     onKeyDown={(e) => {
-                      if (canManageStock && (e.key === "Enter" || e.key === " ")) {
+                      if (canEditStockInvoicePrice && (e.key === "Enter" || e.key === " ")) {
                         e.preventDefault();
                         openStockEditByRow(item);
                       }

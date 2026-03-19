@@ -438,10 +438,19 @@ app.post("/products", requireAuth, requireRole("admin"), (req, res) => {
   res.status(201).json(created);
 });
 
-app.patch("/products/:id", requireAuth, requireRole("admin"), (req, res) => {
+app.patch("/products/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { id } = req.params;
-  const patch = req.body || {};
+  const role = String(req.user?.role || "").toLowerCase();
+  const rawPatch = req.body || {};
+  const patch = role === "manager"
+    ? { invoicePrice: rawPatch.invoicePrice }
+    : rawPatch;
   const incomingSku = patch.sku ? String(patch.sku).trim() : null;
+
+  if (role === "manager" && patch.invoicePrice === undefined) {
+    res.status(400).json({ message: "Manager can edit invoice price only." });
+    return;
+  }
 
   if (incomingSku) {
     const state = getState();
