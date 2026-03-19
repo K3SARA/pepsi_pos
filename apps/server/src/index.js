@@ -392,7 +392,7 @@ app.get("/products", requireAuth, (_req, res) => {
   res.json(getState().products);
 });
 
-app.post("/products", requireAuth, requireRole("admin"), (req, res) => {
+app.post("/products", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const body = req.body || {};
   const name = String(body.name || "").trim();
   const size = String(body.size || "").trim();
@@ -440,17 +440,8 @@ app.post("/products", requireAuth, requireRole("admin"), (req, res) => {
 
 app.patch("/products/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { id } = req.params;
-  const role = String(req.user?.role || "").toLowerCase();
-  const rawPatch = req.body || {};
-  const patch = role === "manager"
-    ? { invoicePrice: rawPatch.invoicePrice }
-    : rawPatch;
+  const patch = req.body || {};
   const incomingSku = patch.sku ? String(patch.sku).trim() : null;
-
-  if (role === "manager" && patch.invoicePrice === undefined) {
-    res.status(400).json({ message: "Manager can edit invoice price only." });
-    return;
-  }
 
   if (incomingSku) {
     const state = getState();
@@ -493,7 +484,7 @@ app.patch("/products/:id", requireAuth, requireRole("admin", "manager"), (req, r
   res.json(updated);
 });
 
-app.delete("/products/:id", requireAuth, requireRole("admin"), (req, res) => {
+app.delete("/products/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
   const { id } = req.params;
   let removed = null;
 
