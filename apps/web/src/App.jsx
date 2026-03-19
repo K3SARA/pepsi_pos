@@ -26,6 +26,7 @@ import {
   submitDeliveryAdjustment,
   submitReturn,
   submitSale,
+  setManagerFullAccess,
   updateCustomer,
   updateAuthUser,
   updateStaff,
@@ -105,6 +106,10 @@ const productDisplayName = (product) => {
   const name = String(product?.name || "").trim();
   const size = String(product?.size || "").trim();
   return size ? `${name} ${size}` : name;
+};
+const scrollViewportToTop = () => {
+  if (typeof window === "undefined") return;
+  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
 };
 const getBundleBreakdown = (row) => {
   const bundleSize = getBundleSize(row);
@@ -570,7 +575,7 @@ const LoginScreen = ({ onLogin, error }) => {
   );
 };
 
-const Header = ({ dashboard, user, onLogout }) => {
+const Header = ({ dashboard, user, onLogout, managerFullAccess = false }) => {
   const headerUser = user.role === "admin" ? "M.W.M.B CHANDRASEKARA" : (user.name || user.username || "").toUpperCase();
   const roleLabel = user.role === "cashier"
     ? "Cashier Dashboard"
@@ -587,6 +592,11 @@ const Header = ({ dashboard, user, onLogout }) => {
             <h1>Pepsi Distributer</h1>
             <p className="brand-user">{headerUser}</p>
             <p className="brand-role">{roleLabel}</p>
+            {user.role === "manager" ? (
+              <span className={`header-pill manager-mode-pill ${managerFullAccess ? "manager-mode-pill-full" : "manager-mode-pill-limited"}`}>
+                {managerFullAccess ? "Full Access Enabled" : "Limited Access"}
+              </span>
+            ) : null}
           </div>
         </div>
         <button className="logout-btn" type="button" onClick={onLogout}>LOG OUT</button>
@@ -942,6 +952,7 @@ const CashierView = ({
 
   useEffect(() => {
     setMobileCashierNavOpen(false);
+    scrollViewportToTop();
   }, [cashierPage]);
 
   const returnSale = useMemo(
@@ -1949,6 +1960,15 @@ const CashierView = ({
   );
 };
 
+const REPORT_SUBPAGES = [
+  { id: "item-wise", label: "Item Wise Report" },
+  { id: "sales-wise", label: "Sales Wise Report" },
+  { id: "cheque-summary", label: "Cheque Summary" },
+  { id: "customer-wise", label: "Customer Wise Report" },
+  { id: "rep-outstanding", label: "Rep Wise Customer Outstanding" },
+  { id: "delivery-report", label: "Delivery Report" }
+];
+
 const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleDeleted, user }) => {
   const [showLowStock, setShowLowStock] = useState(false);
   const [showChequeAlertDetails, setShowChequeAlertDetails] = useState(false);
@@ -2019,11 +2039,16 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [tableSort, setTableSort] = useState({});
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [authUsers, setAuthUsers] = useState([]);
+  const [managerAccessPending, setManagerAccessPending] = useState(false);
+  const [reportSubpage, setReportSubpage] = useState("item-wise");
+  const [reportMenuOpen, setReportMenuOpen] = useState(false);
+  const reportMenuRef = useRef(null);
   const isManager = String(user?.role || "").toLowerCase() === "manager";
-  const canManageStock = ["admin", "manager"].includes(String(user?.role || "").toLowerCase());
-  const canManageCustomerOpeningOutstanding = true;
-  const canManageCustomerLimits = !isManager;
-  const canManageUsers = !isManager;
+  const managerFullAccessEnabled = Boolean(state?.settings?.managerFullAccess);
+  const canManageStock = !isManager || managerFullAccessEnabled;
+  const canManageCustomerOpeningOutstanding = !isManager || managerFullAccessEnabled;
+  const canManageCustomerLimits = !isManager || managerFullAccessEnabled;
+  const canManageUsers = !isManager || managerFullAccessEnabled;
 
   useEffect(() => {
     if (!notice) return;
@@ -2035,7 +2060,23 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
   useEffect(() => {
     setMobileNavOpen(false);
+    scrollViewportToTop();
   }, [activePage]);
+
+  useEffect(() => {
+    if (!reportMenuOpen) return;
+    const handlePointerDown = (event) => {
+      if (!reportMenuRef.current?.contains(event.target)) {
+        setReportMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("touchstart", handlePointerDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("touchstart", handlePointerDown);
+    };
+  }, [reportMenuOpen]);
 
   useEffect(() => {
     if (!canManageUsers) {
@@ -2123,10 +2164,21 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const maxCount = Math.max(1, ...chartData.map((item) => item.count));
   const repChartData = useMemo(() => {
     const map = new Map();
+    const isRepRole = (value) => {
+      const role = String(value || "").trim().toLowerCase();
+      return role === "cashier" || role === "rep";
+    };
     for (const member of (state.staff || [])) {
+      if (!isRepRole(member.role)) continue;
       const repName = String(member.name || "").trim();
       if (!repName) continue;
       map.set(repName, 0);
+    }
+    for (const authUser of (authUsers || [])) {
+      if (!isRepRole(authUser.role)) continue;
+      const repName = String(authUser.name || authUser.username || "").trim();
+      if (!repName) continue;
+      map.set(repName, map.get(repName) || 0);
     }
     for (const sale of state.sales) {
       const saleDay = String(sale.createdAt || "").slice(0, 10);
@@ -2138,7 +2190,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     return [...map.entries()]
       .map(([rep, count]) => ({ rep, count }))
       .sort((a, b) => b.count - a.count);
-  }, [state.sales, state.staff, repDateFrom, repDateTo]);
+  }, [state.sales, state.staff, authUsers, repDateFrom, repDateTo]);
 
   const filteredRepChartData = useMemo(() => {
     if (!selectedRep) return repChartData;
@@ -2864,16 +2916,22 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       if (outstanding <= 0) continue;
       if ((String(sale.cashier || "-").trim() || "-") !== repKey) continue;
       const customerName = String(sale.customerName || "Walk-in").trim() || "Walk-in";
-      const row = map.get(customerName) || { customerName, bills: 0, outstanding: 0 };
+      const row = map.get(customerName) || { customerName, bills: 0, outstanding: 0, oldestOutstandingSale: null };
       row.bills += 1;
       row.outstanding += outstanding;
+      const saleTime = new Date(sale.createdAt || 0).getTime();
+      const oldestTime = row.oldestOutstandingSale ? new Date(row.oldestOutstandingSale.createdAt || 0).getTime() : Number.POSITIVE_INFINITY;
+      if (!row.oldestOutstandingSale || saleTime < oldestTime) {
+        row.oldestOutstandingSale = sale;
+      }
       map.set(customerName, row);
     }
     return [...map.values()]
       .map((row) => ({
         customerName: row.customerName,
         bills: row.bills,
-        outstanding: Number(row.outstanding.toFixed(2))
+        outstanding: Number(row.outstanding.toFixed(2)),
+        daysLabel: row.oldestOutstandingSale ? customerOutstandingAging(row.oldestOutstandingSale).label : "-"
       }))
       .sort((a, b) => Number(b.outstanding || 0) - Number(a.outstanding || 0));
   }, [repOutstandingDetailRep, reportSales]);
@@ -3394,9 +3452,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           <td>${escapeHtml(String(row.customerName || "-"))}</td>
           <td>${Number(row.bills || 0)}</td>
           <td>LKR ${formatLkrValue(row.outstanding || 0)}</td>
+          <td>${escapeHtml(String(row.daysLabel || "-"))}</td>
         </tr>
       `).join("")
-      : `<tr><td colspan="3">No outstanding customers for this rep in the selected range.</td></tr>`;
+      : `<tr><td colspan="4">No outstanding customers for this rep in the selected range.</td></tr>`;
     const printHtml = `<!doctype html>
 <html>
 <head>
@@ -3441,6 +3500,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           <th>Customer</th>
           <th>Bills</th>
           <th>Outstanding (LKR)</th>
+          <th>Days Left</th>
         </tr>
       </thead>
       <tbody>${bodyRows}</tbody>
@@ -3575,6 +3635,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const saveCustomer = () => {
     if (!customerForm.name.trim()) {
       setNotice("Customer name is required.");
+      return;
+    }
+    if (isManager && !managerFullAccessEnabled) {
+      setNotice("Manager limited access cannot edit customers.");
       return;
     }
     const openingOutstanding = Number(customerForm.openingOutstanding || 0);
@@ -3785,6 +3849,19 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       setNotice(error.message || "Unable to update loading row status.");
     } finally {
       setLoadingMarkPendingKey("");
+    }
+  };
+
+  const handleManagerFullAccessToggle = async () => {
+    if (isManager) return;
+    try {
+      setManagerAccessPending(true);
+      await setManagerFullAccess({ enabled: !managerFullAccessEnabled });
+      setNotice(!managerFullAccessEnabled ? "Manager full access enabled." : "Manager full access disabled.");
+    } catch (error) {
+      setNotice(error.message || "Unable to update manager full access.");
+    } finally {
+      setManagerAccessPending(false);
     }
   };
 
@@ -5044,6 +5121,23 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <span>{creditLimitAlertSummary.count ? `${creditLimitAlertSummary.count} customer limit alert${creditLimitAlertSummary.count === 1 ? "" : "s"}` : "No credit-limit alerts right now"}</span>
                   </div>
                 </div>
+                {!isManager ? (
+                  <div className="dashboard-notification-row manager-access-row">
+                    <div className="dashboard-notification-copy">
+                      <strong>Manager Full Access</strong>
+                      <span>{managerFullAccessEnabled ? "Manager can use restricted admin actions" : "Manager is limited to standard manager permissions"}</span>
+                    </div>
+                    <button
+                      type="button"
+                      className={`manager-access-switch ${managerFullAccessEnabled ? "on" : ""}`}
+                      onClick={handleManagerFullAccessToggle}
+                      disabled={managerAccessPending}
+                      aria-pressed={managerFullAccessEnabled}
+                    >
+                      <span>{managerAccessPending ? "..." : managerFullAccessEnabled ? "ON" : "OFF"}</span>
+                    </button>
+                  </div>
+                ) : null}
                 {upcomingChequeSummary.count ? (
                   <button type="button" className="admin-mobile-section dashboard-headline-banner cheque-headline-banner dashboard-headline-button" onClick={() => setShowChequeAlertDetails(true)}>
                     <strong>Cheque Alert Tomorrow</strong>
@@ -5058,6 +5152,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <div className="snapshot-grid">
                       <article><p>Total sales</p><strong>{dashboard.salesCount}</strong></article>
                       <article><p>Today sales</p><strong>{dashboard.todaySalesCount}</strong></article>
+                      <article className="snapshot-card-outstanding snapshot-card-outstanding-total"><p>Total Outstanding</p><strong>{formatLkrValue(customerPageSummary.totalOutstanding || 0)}</strong></article>
+                      <article className="snapshot-card-outstanding snapshot-card-outstanding-today"><p>Today Outstanding</p><strong>{formatLkrValue(dashboard.todayOutstanding || 0)}</strong></article>
                       <article><p>Today Ordered Value</p><strong>{dashboard.todayRevenue.toFixed(0)}</strong></article>
                       <article><p>Low Stock</p><strong>{dashboard.lowStockItems.length}</strong></article>
                     </div>
@@ -5170,6 +5266,20 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   Matched reps: {filteredRepChartData.length}
                   {(repDateFrom || repDateTo) ? ` • Range: ${repDateFrom || "start"} to ${repDateTo || "today"}` : ""}
                 </div>
+                <div className="rep-chart-metrics">
+                  <article>
+                    <span>Total Orders</span>
+                    <strong>{filteredRepChartData.reduce((sum, item) => sum + Number(item.count || 0), 0)}</strong>
+                  </article>
+                  <article>
+                    <span>Top Rep</span>
+                    <strong>{filteredRepChartData[0]?.rep || "-"}</strong>
+                  </article>
+                  <article>
+                    <span>Top Orders</span>
+                    <strong>{filteredRepChartData[0]?.count || 0}</strong>
+                  </article>
+                </div>
                 <div className="bar-chart rep-bar-chart">
                   {filteredRepChartData.map((item) => (
                     <div key={item.rep} className="bar-col">
@@ -5187,6 +5297,42 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
           {activePage === "reports" ? (
             <div className="admin-mobile admin-reports">
+              <section className="admin-mobile-section reports-subnav-panel">
+                <div className="reports-subnav-head">
+                  <div>
+                    <span className="reports-subnav-kicker">Reports</span>
+                    <h2>{(REPORT_SUBPAGES.find((item) => item.id === reportSubpage) || REPORT_SUBPAGES[0]).label}</h2>
+                  </div>
+                  <div className="reports-subnav" ref={reportMenuRef}>
+                    <button
+                      type="button"
+                      className={`reports-subnav-trigger ${reportMenuOpen ? "open" : ""}`}
+                      onClick={() => setReportMenuOpen((open) => !open)}
+                    >
+                      {(REPORT_SUBPAGES.find((item) => item.id === reportSubpage) || REPORT_SUBPAGES[0]).label}
+                    </button>
+                    {reportMenuOpen ? (
+                      <div className="reports-subnav-menu">
+                        {REPORT_SUBPAGES.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            className={reportSubpage === item.id ? "active" : ""}
+                            onClick={() => {
+                              setReportSubpage(item.id);
+                              setReportMenuOpen(false);
+                            }}
+                          >
+                            {item.label}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+              </section>
+
+              {reportSubpage === "item-wise" ? (
               <section className="admin-mobile-section report-panel report-itemwise-panel">
                 <div className="report-head">
                   <h2>Item Wise Report</h2>
@@ -5224,7 +5370,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   )) : <p>No item-wise records yet.</p>}
                 </div>
               </section>
+              ) : null}
 
+              {reportSubpage === "sales-wise" ? (
               <section className="admin-mobile-section report-panel report-saleswise-panel">
                 <h2>Sales Wise Report</h2>
                 <div className="rep-date-filters">
@@ -5281,7 +5429,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   )) : <p>No sales records yet.</p>}
                 </div>
               </section>
+              ) : null}
 
+              {reportSubpage === "cheque-summary" ? (
               <section className="admin-mobile-section report-panel cheque-report-panel">
                 <h2>Cheque Summary</h2>
                 <div className="cheque-summary-grid">
@@ -5317,7 +5467,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   </article>
                 </div>
               </section>
+              ) : null}
 
+              {reportSubpage === "customer-wise" ? (
               <section className="admin-mobile-section report-panel report-customerwise-panel">
                 <h2>Customer Wise Report</h2>
                 <div className="admin-table customer-wise-report-table">
@@ -5377,7 +5529,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   </div>
                 </section>
               </section>
+              ) : null}
 
+              {reportSubpage === "rep-outstanding" ? (
               <section className="admin-mobile-section report-panel report-rep-outstanding-panel">
                 <h2>Rep Wise Customer Outstanding</h2>
                 <div className="rep-outstanding-summary-grid">
@@ -5428,7 +5582,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   )) : <p>No rep outstanding balances in selected range.</p>}
                 </div>
               </section>
+              ) : null}
 
+              {reportSubpage === "delivery-report" ? (
               <section className="admin-mobile-section report-panel report-delivery-panel">
                 <div className="delivery-report-divider">
                   <span>DELIVERY INTELLIGENCE</span>
@@ -5491,6 +5647,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   )) : <p>No delivery report records for selected filters.</p>}
                 </div>
               </section>
+              ) : null}
             </div>
           ) : null}
 
@@ -5656,7 +5813,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 />
               </label>
               {!canManageCustomerLimits ? (
-                <p className="form-hint customer-form-lock-note">Manager access can edit opening outstanding and customer profile details, but not credit limit or discount limit.</p>
+                <p className="form-hint customer-form-lock-note">Manager limited access cannot edit customer details. Enable full access to unlock customer editing.</p>
               ) : null}
               <label className="customer-entry-field customer-entry-field-full">
                 <span>Address</span>
@@ -5728,12 +5885,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                 <span>Customer</span>
                 <span>Bills</span>
                 <span>Outstanding (LKR)</span>
+                <span>Days Left</span>
               </header>
               {repOutstandingDetailRows.length ? repOutstandingDetailRows.map((row) => (
                 <article key={`rep-out-detail-${repOutstandingDetailRep}-${row.customerName}`}>
                   <span>{row.customerName}</span>
                   <span>{row.bills}</span>
                   <span className="outstanding-text">{formatLkrValue(row.outstanding)}</span>
+                  <span className={String(row.daysLabel || "").toLowerCase().includes("overdue") ? "outstanding-text" : ""}>{row.daysLabel || "-"}</span>
                 </article>
               )) : <p>No outstanding customers for this rep in the selected range.</p>}
             </div>
@@ -6192,7 +6351,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
 export const App = () => {
   const [state, setState] = useState({ settings: {}, products: [], sales: [], returns: [] });
-  const [dashboard, setDashboard] = useState({ salesCount: 0, todaySalesCount: 0, todayRevenue: 0, lowStockItems: [] });
+  const [dashboard, setDashboard] = useState({ salesCount: 0, todaySalesCount: 0, todayRevenue: 0, todayOutstanding: 0, lowStockItems: [] });
   const [search, setSearch] = useState("");
   const [cashier, setCashier] = useState("");
   const [customerName, setCustomerName] = useState("");
@@ -6573,7 +6732,7 @@ export const App = () => {
 
   return (
     <div className="shell">
-      <Header dashboard={dashboard} user={session.user} onLogout={logout} />
+      <Header dashboard={dashboard} user={session.user} onLogout={logout} managerFullAccess={Boolean(state?.settings?.managerFullAccess)} />
       {session.user.role === "cashier" ? (
         <CashierView
           state={state}

@@ -205,3 +205,9 @@ export const setLoadingRowMark = (payload) =>
     method: "POST",
     body: JSON.stringify(payload)
   });
+
+export const setManagerFullAccess = (payload) =>
+  request("/settings/manager-full-access", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });

@@ -25,6 +25,21 @@ import {
 const BASE_LORRIES = ["Lorry A", "Lorry B"];
 const ORDER_LORRIES = ["Lorry A", "Lorry A Overflow", "Lorry B", "Lorry B Overflow"];
 
+const managerHasFullAccess = (state = null) => Boolean((state || getState())?.settings?.managerFullAccess);
+
+const requireAdminOrManagerFullAccess = (req, res, next) => {
+  const role = String(req.user?.role || "").toLowerCase();
+  if (role === "admin") {
+    next();
+    return;
+  }
+  if (role === "manager" && managerHasFullAccess()) {
+    next();
+    return;
+  }
+  res.status(403).json({ message: "Manager full access is required" });
+};
+
 const normalizeSalePayments = (sale) => {
   const explicit = Array.isArray(sale?.payments) ? sale.payments : [];
   if (explicit.length) return explicit;
@@ -345,11 +360,11 @@ app.get("/auth/me", requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
-app.get("/auth/users", requireAuth, requireRole("admin"), (_req, res) => {
+app.get("/auth/users", requireAuth, requireAdminOrManagerFullAccess, (_req, res) => {
   res.json(listUsers());
 });
 
-app.post("/auth/users", requireAuth, requireRole("admin"), async (req, res) => {
+app.post("/auth/users", requireAuth, requireAdminOrManagerFullAccess, async (req, res) => {
   try {
     const user = await createAuthUser(req.body || {});
     res.status(201).json(user);
@@ -358,7 +373,7 @@ app.post("/auth/users", requireAuth, requireRole("admin"), async (req, res) => {
   }
 });
 
-app.patch("/auth/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
+app.patch("/auth/users/:id", requireAuth, requireAdminOrManagerFullAccess, async (req, res) => {
   try {
     const user = await updateAuthUser(req.params.id, req.body || {});
     res.json(user);
@@ -369,7 +384,7 @@ app.patch("/auth/users/:id", requireAuth, requireRole("admin"), async (req, res)
   }
 });
 
-app.delete("/auth/users/:id", requireAuth, requireRole("admin"), async (req, res) => {
+app.delete("/auth/users/:id", requireAuth, requireAdminOrManagerFullAccess, async (req, res) => {
   try {
     const user = await deleteAuthUser(req.params.id, req.user?.id || "");
     res.json(user);
@@ -392,7 +407,7 @@ app.get("/products", requireAuth, (_req, res) => {
   res.json(getState().products);
 });
 
-app.post("/products", requireAuth, requireRole("admin", "manager"), (req, res) => {
+app.post("/products", requireAuth, requireAdminOrManagerFullAccess, (req, res) => {
   const body = req.body || {};
   const name = String(body.name || "").trim();
   const size = String(body.size || "").trim();
@@ -438,7 +453,7 @@ app.post("/products", requireAuth, requireRole("admin", "manager"), (req, res) =
   res.status(201).json(created);
 });
 
-app.patch("/products/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
+app.patch("/products/:id", requireAuth, requireAdminOrManagerFullAccess, (req, res) => {
   const { id } = req.params;
   const patch = req.body || {};
   const incomingSku = patch.sku ? String(patch.sku).trim() : null;
@@ -484,7 +499,7 @@ app.patch("/products/:id", requireAuth, requireRole("admin", "manager"), (req, r
   res.json(updated);
 });
 
-app.delete("/products/:id", requireAuth, requireRole("admin", "manager"), (req, res) => {
+app.delete("/products/:id", requireAuth, requireAdminOrManagerFullAccess, (req, res) => {
   const { id } = req.params;
   let removed = null;
 
@@ -542,8 +557,8 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
   }
 
   const role = String(req.user?.role || "").toLowerCase();
-  const canManageOpeningOutstanding = ["admin", "manager"].includes(role);
-  const canManageCustomerLimits = role === "admin";
+  const canManageOpeningOutstanding = role === "admin" || (role === "manager" && managerHasFullAccess());
+  const canManageCustomerLimits = role === "admin" || (role === "manager" && managerHasFullAccess());
   const record = {
     id: nanoid(12),
     name,
@@ -568,6 +583,10 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
 app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manager"), (req, res) => {
   const { id } = req.params;
   const body = req.body || {};
+  if (req.user?.role === "manager" && !managerHasFullAccess()) {
+    res.status(403).json({ message: "Manager full access is required to edit customers" });
+    return;
+  }
   const hasOpeningOutstanding = Object.prototype.hasOwnProperty.call(body, "openingOutstanding");
   const hasCreditLimit = Object.prototype.hasOwnProperty.call(body, "creditLimit");
   const hasDiscountLimit = Object.prototype.hasOwnProperty.call(body, "discountLimit");
@@ -599,7 +618,9 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
         name: body.name !== undefined ? String(body.name || "").trim() : state.customers[idx].name,
         phone: body.phone !== undefined ? String(body.phone || "").trim() : state.customers[idx].phone,
         address: body.address !== undefined ? String(body.address || "").trim() : state.customers[idx].address,
-        ...(hasOpeningOutstanding ? { openingOutstanding } : {})
+        ...(hasOpeningOutstanding ? { openingOutstanding } : {}),
+        ...(hasCreditLimit ? { creditLimit } : {}),
+        ...(hasDiscountLimit ? { discountLimit } : {})
       };
     } else {
       state.customers[idx] = {
@@ -664,11 +685,22 @@ app.post("/settings/loading-row-mark", requireAuth, requireRole("admin", "manage
   res.json(next.settings?.loadingRowMarks || {});
 });
 
+app.post("/settings/manager-full-access", requireAuth, requireRole("admin"), (req, res) => {
+  const enabled = Boolean(req.body?.enabled);
+  const next = updateState((state) => {
+    state.settings = state.settings || {};
+    state.settings.managerFullAccess = enabled;
+    return state;
+  });
+  sendFullSync();
+  res.json({ enabled: Boolean(next.settings?.managerFullAccess) });
+});
+
 app.get("/staff", requireAuth, requireRole("admin", "manager"), (_req, res) => {
   res.json(getState().staff || []);
 });
 
-app.post("/staff", requireAuth, requireRole("admin"), (req, res) => {
+app.post("/staff", requireAuth, requireAdminOrManagerFullAccess, (req, res) => {
   const body = req.body || {};
   if (!body.name?.trim()) {
     res.status(400).json({ message: "Staff name is required" });
@@ -693,7 +725,7 @@ app.post("/staff", requireAuth, requireRole("admin"), (req, res) => {
   res.status(201).json(record);
 });
 
-app.patch("/staff/:id", requireAuth, requireRole("admin"), (req, res) => {
+app.patch("/staff/:id", requireAuth, requireAdminOrManagerFullAccess, (req, res) => {
   const { id } = req.params;
   const body = req.body || {};
 
@@ -715,7 +747,7 @@ app.patch("/staff/:id", requireAuth, requireRole("admin"), (req, res) => {
   res.json(updated);
 });
 
-app.delete("/staff/:id", requireAuth, requireRole("admin"), (req, res) => {
+app.delete("/staff/:id", requireAuth, requireAdminOrManagerFullAccess, (req, res) => {
   const { id } = req.params;
   const next = updateState((state) => {
     state.staff = state.staff || [];
@@ -1525,6 +1557,7 @@ app.get("/dashboard", requireAuth, (_req, res) => {
 
   const todaySales = sales.filter((sale) => sale.createdAt >= todayStart);
   const todayRevenue = todaySales.reduce((acc, sale) => acc + Number(sale.total || 0), 0);
+  const todayOutstanding = todaySales.reduce((acc, sale) => acc + Number(sale.outstandingAmount || 0), 0);
 
   const lowStockItems = state.products.filter((item) => item.stock <= 25);
 
@@ -1532,6 +1565,7 @@ app.get("/dashboard", requireAuth, (_req, res) => {
     salesCount: sales.length,
     todaySalesCount: todaySales.length,
     todayRevenue: Number(todayRevenue.toFixed(2)),
+    todayOutstanding: Number(todayOutstanding.toFixed(2)),
     lowStockItems
   });
 });
