@@ -2485,6 +2485,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       topCustomerSpent: Number(topCustomer?.spent || 0)
     };
   }, [sortedCustomerRows]);
+  const totalOutstandingExcludingToday = Math.max(
+    0,
+    Number((Number(customerPageSummary?.totalOutstanding || 0) - Number(dashboard?.todayOutstanding || 0)).toFixed(2))
+  );
   const overdueCreditSummary = useMemo(() => {
     const now = Date.now();
     const byCustomer = new Map();
@@ -5166,7 +5170,11 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <div className="snapshot-grid">
                       <article><p>Total sales</p><strong>{dashboard.salesCount}</strong></article>
                       <article><p>Today sales</p><strong>{dashboard.todaySalesCount}</strong></article>
-                      <article className="snapshot-card-outstanding snapshot-card-outstanding-total"><p>Total Outstanding</p><strong>{formatLkrValue(customerPageSummary.totalOutstanding || 0)}</strong></article>
+                      <article className="snapshot-card-outstanding snapshot-card-outstanding-total">
+                        <p>Total Outstanding</p>
+                        <strong>{formatLkrValue(customerPageSummary.totalOutstanding || 0)}</strong>
+                        <small className="snapshot-subvalue">Without Today: {formatLkrValue(totalOutstandingExcludingToday)}</small>
+                      </article>
                       <article className="snapshot-card-outstanding snapshot-card-outstanding-today"><p>Today Outstanding</p><strong>{formatLkrValue(dashboard.todayOutstanding || 0)}</strong></article>
                       <article><p>Today Ordered Value</p><strong>{dashboard.todayRevenue.toFixed(0)}</strong></article>
                       <article><p>Low Stock</p><strong>{dashboard.lowStockItems.length}</strong></article>
