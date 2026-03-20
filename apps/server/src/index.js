@@ -24,6 +24,21 @@ import {
 
 const BASE_LORRIES = ["Lorry A", "Lorry B"];
 const ORDER_LORRIES = ["Lorry A", "Lorry A Overflow", "Lorry B", "Lorry B Overflow"];
+const BUSINESS_TIME_ZONE = "Asia/Colombo";
+const colomboDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: BUSINESS_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
+
+const toColomboDateKey = (value = new Date()) => {
+  try {
+    return colomboDateFormatter.format(new Date(value));
+  } catch {
+    return "";
+  }
+};
 
 const managerHasFullAccess = (state = null) => Boolean((state || getState())?.settings?.managerFullAccess);
 
@@ -289,8 +304,8 @@ app.get("/db/readonly", (req, res) => {
 
   const state = getState();
   const normalizedSales = (state.sales || []).map((sale) => recalculateSaleFinancials(sale));
-  const today = new Date().toISOString().slice(0, 10);
-  const todaySales = normalizedSales.filter((sale) => String(sale.createdAt || "").slice(0, 10) === today);
+  const today = toColomboDateKey();
+  const todaySales = normalizedSales.filter((sale) => toColomboDateKey(sale.createdAt) === today);
   const todayRevenue = todaySales.reduce((acc, sale) => acc + Number(sale.netTotalAfterReturns || 0), 0);
 
   res.json({
@@ -1552,10 +1567,8 @@ app.get("/dashboard", requireAuth, (_req, res) => {
   const state = getState();
   const sales = (state.sales || []).map((sale) => recalculateSaleFinancials(sale));
 
-  const today = new Date();
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
-
-  const todaySales = sales.filter((sale) => sale.createdAt >= todayStart);
+  const today = toColomboDateKey();
+  const todaySales = sales.filter((sale) => toColomboDateKey(sale.createdAt) === today);
   const todayRevenue = todaySales.reduce((acc, sale) => acc + Number(sale.total || 0), 0);
   const todayOutstanding = todaySales.reduce((acc, sale) => acc + Number(sale.outstandingAmount || 0), 0);
 

@@ -40,6 +40,13 @@ const formatLkrValue = (value) => Number(value || 0).toLocaleString("en-US", {
 });
 const currency = (value) => `LKR ${formatLkrValue(value)}`;
 const SESSION_KEY = "pepsi_pos_session";
+const BUSINESS_TIME_ZONE = "Asia/Colombo";
+const colomboDateFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: BUSINESS_TIME_ZONE,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit"
+});
 const escapeHtml = (value = "") => String(value)
   .replace(/&/g, "&amp;")
   .replace(/</g, "&lt;")
@@ -106,6 +113,13 @@ const productDisplayName = (product) => {
   const name = String(product?.name || "").trim();
   const size = String(product?.size || "").trim();
   return size ? `${name} ${size}` : name;
+};
+const toColomboDateKey = (value = new Date()) => {
+  try {
+    return colomboDateFormatter.format(new Date(value));
+  } catch {
+    return "";
+  }
 };
 const scrollViewportToTop = () => {
   if (typeof window === "undefined") return;
@@ -725,13 +739,13 @@ const CashierView = ({
   }, [customerName, customerOutstandingMap]);
   const repSessionStats = useMemo(() => {
     const rep = String(cashier || "").trim().toLowerCase();
-    const today = new Date().toISOString().slice(0, 10);
+    const today = toColomboDateKey();
     let orders = 0;
     let revenue = 0;
     for (const sale of (state.sales || [])) {
       const saleRep = String(sale.cashier || "").trim().toLowerCase();
       if (!rep || saleRep !== rep) continue;
-      if (String(sale.createdAt || "").slice(0, 10) !== today) continue;
+      if (toColomboDateKey(sale.createdAt) !== today) continue;
       orders += 1;
       revenue += saleNetTotal(sale);
     }
@@ -2089,7 +2103,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   }, [canManageUsers, state.staff]);
 
   const inDateRange = (iso, from, to) => {
-    const day = String(iso || "").slice(0, 10);
+    const day = toColomboDateKey(iso);
     if (!day) return false;
     if (from && day < from) return false;
     if (to && day > to) return false;
@@ -2149,9 +2163,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const cursor = new Date(startDate);
     let guard = 0;
     while (cursor <= endDate && guard < 62) {
-      const key = cursor.toISOString().slice(0, 10);
+      const key = toColomboDateKey(cursor);
       const short = cursor.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-      const daySales = state.sales.filter((sale) => String(sale.createdAt || "").slice(0, 10) === key);
+      const daySales = state.sales.filter((sale) => toColomboDateKey(sale.createdAt) === key);
       const count = daySales.length;
       const revenue = daySales.reduce((acc, sale) => acc + saleNetTotal(sale), 0);
       base.push({ key, short, count, revenue: Number(revenue.toFixed(2)) });
@@ -2181,7 +2195,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       map.set(repName, map.get(repName) || 0);
     }
     for (const sale of state.sales) {
-      const saleDay = String(sale.createdAt || "").slice(0, 10);
+      const saleDay = toColomboDateKey(sale.createdAt);
       if (repDateFrom && saleDay && saleDay < repDateFrom) continue;
       if (repDateTo && saleDay && saleDay > repDateTo) continue;
       const rep = sale.cashier || "Unknown";
