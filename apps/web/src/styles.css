@@ -2645,6 +2645,7 @@ button:disabled {
 .reports-subnav-panel {
   position: relative;
   overflow: visible;
+  z-index: 40;
 }
 
 .reports-subnav-head {
@@ -5807,6 +5808,10 @@ button:disabled {
   .admin-mobile-section {
     min-width: 0;
     overflow: hidden;
+  }
+
+  .admin-mobile-section.reports-subnav-panel {
+    overflow: visible;
   }
 
   .admin-table {
