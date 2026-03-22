@@ -208,6 +208,29 @@ const totalDiscountApplied = ({ lines = [], billDiscount = 0 }) => {
   }, 0).toFixed(2));
   return Number((lineDiscountTotal + Math.max(0, Number(billDiscount || 0))).toFixed(2));
 };
+const findBundleDiscountViolation = ({ lines = [], bundleDiscountLimit = 0 }) => {
+  const limit = Number(Number(bundleDiscountLimit || 0).toFixed(2));
+  if (!(limit > 0)) return null;
+  for (const line of (lines || [])) {
+    const qty = Math.max(0, Number(line?.quantity || 0));
+    const bundleSize = getBundleSize(line);
+    if (!(bundleSize > 0) || qty < bundleSize) continue;
+    const fullBundles = Math.floor(qty / bundleSize);
+    const unitDiscount = Number(Number(lineItemDiscount(line) || 0).toFixed(2));
+    if (!(fullBundles > 0) || !(unitDiscount > 0)) continue;
+    const actualBundleDiscount = Number((unitDiscount * fullBundles * bundleSize).toFixed(2));
+    const allowedBundleDiscount = Number((fullBundles * limit).toFixed(2));
+    if (actualBundleDiscount > allowedBundleDiscount) {
+      return {
+        lineName: String(line?.name || "").trim() || "Item",
+        fullBundles,
+        actualBundleDiscount,
+        allowedBundleDiscount
+      };
+    }
+  }
+  return null;
+};
 const salePayments = (sale) => {
   const explicit = Array.isArray(sale?.payments) ? sale.payments : [];
   if (explicit.length) return explicit;
@@ -649,6 +672,7 @@ const CashierView = ({
   discountValue,
   setDiscountValue,
   selectedCustomerDiscountLimit,
+  selectedCustomerBundleDiscountLimit,
   selectedCustomerAvailableCredit,
   cartDiscountTotal,
   customerCreditDraft,
@@ -888,10 +912,10 @@ const CashierView = ({
     } catch {}
   };
 
-  const addToCart = (product) => {
+  const addToCartWithQty = (product, requestedQty) => {
     if (getCatalogStock(product) <= 0) return;
     triggerAddHaptic();
-    const requested = Math.floor(Number(catalogQtyDrafts[product.id] || 1));
+    const requested = Math.floor(Number(requestedQty || 1));
     const requestQty = Number.isFinite(requested) && requested > 0 ? requested : 1;
     setCart((current) => {
       const idx = current.findIndex((line) => line.productId === product.id);
@@ -915,6 +939,11 @@ const CashierView = ({
     setCatalogQtyDrafts((current) => ({ ...current, [product.id]: "" }));
   };
 
+  const addToCart = (product) => {
+    const requested = Math.floor(Number(catalogQtyDrafts[product.id] || 1));
+    addToCartWithQty(product, requested);
+  };
+
   const updateQty = (productId, quantity) => {
     if (quantity === "") return;
     const parsed = Number(quantity);
@@ -925,6 +954,15 @@ const CashierView = ({
       return;
     }
     setCart((current) => current.map((line) => (line.productId === productId ? { ...line, quantity: nextQty } : line)));
+  };
+  const updateQtyByBundle = (line, direction) => {
+    const bundleSize = getBundleSize(line);
+    if (!(bundleSize > 0)) return;
+    const currentQty = Math.max(0, Number(line?.quantity || 0));
+    const nextQty = direction === "down"
+      ? Math.max(0, currentQty - bundleSize)
+      : currentQty + bundleSize;
+    updateQty(line.productId, nextQty);
   };
   const updateItemDiscount = (productId, value) => {
     const parsed = Number(value || 0);
@@ -1190,9 +1228,17 @@ const CashierView = ({
         const discountLimit = (state.customers || [])
           .filter((item) => String(item.name || "").trim().toLowerCase() === String(saleBeingEdited?.customerName || "").trim().toLowerCase())
           .reduce((max, item) => Math.max(max, Number(item.discountLimit || 0)), 0);
+        const bundleDiscountLimit = (state.customers || [])
+          .filter((item) => String(item.name || "").trim().toLowerCase() === String(saleBeingEdited?.customerName || "").trim().toLowerCase())
+          .reduce((max, item) => Math.max(max, Number(item.bundleDiscountLimit || 0)), 0);
         const totalDiscount = totalDiscountApplied({ lines, billDiscount });
         if (discountLimit > 0 && totalDiscount > discountLimit) {
           setSaleEditError(`Customer discount limit is ${currency(discountLimit)}. Current discount is ${currency(totalDiscount)}.`);
+          return;
+        }
+        const bundleDiscountViolation = findBundleDiscountViolation({ lines, bundleDiscountLimit });
+        if (bundleDiscountViolation) {
+          setSaleEditError(`${bundleDiscountViolation.lineName} exceeds bundle discount limit. Allowed: ${currency(bundleDiscountViolation.allowedBundleDiscount)} for ${bundleDiscountViolation.fullBundles} bundle(s).`);
           return;
         }
         setSavingSaleEdit(true);
@@ -1304,13 +1350,13 @@ const CashierView = ({
       </div>
 
       {cashierPage === "billing" ? (
-        <main className="grid billing-grid">
-          <section className="panel">
+        <main className="grid billing-grid rep-billing-layout rep-ui-1">
+          <section className="panel rep-panel rep-catalog-panel">
             <h2 className="panel-title"><span className="panel-icon" aria-hidden="true">📦</span>Catalog</h2>
             <input className="search-icon-input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search product / sku / category" />
-            <div className="list">
+            <div className="list rep-catalog-list">
               {filteredProducts.map((product) => (
-                <article key={product.id} className="list-row">
+                <article key={product.id} className="list-row catalog-product-row">
                   <div>
                     <strong>{productDisplayName(product)}</strong>
                     <p>{product.sku} • {product.category}</p>
@@ -1321,6 +1367,11 @@ const CashierView = ({
                         Stock {getCatalogStock(product)}
                       </span>
                     </p>
+                    {getBundleSize(product) > 0 ? (
+                      <p className="catalog-bundle-rule">
+                        {getBundleSize(product)} units = 1 bundle
+                      </p>
+                    ) : null}
                   </div>
                   <div className="catalog-add-wrap">
                     <input
@@ -1331,17 +1382,41 @@ const CashierView = ({
                       placeholder="Qty"
                       className="catalog-qty-input"
                     />
-                    <button className="add-feedback-btn" type="button" onTouchStart={triggerAddHaptic} onPointerDown={triggerAddHaptic} onClick={() => addToCart(product)} disabled={getCatalogStock(product) <= 0}>Add</button>
+                    <div className="catalog-quick-actions">
+                      {getBundleSize(product) > 0 ? (
+                        <button
+                          className="catalog-bundle-btn"
+                          type="button"
+                          onTouchStart={triggerAddHaptic}
+                          onPointerDown={triggerAddHaptic}
+                          onClick={() => addToCartWithQty(product, getBundleSize(product))}
+                          disabled={getCatalogStock(product) < getBundleSize(product)}
+                        >
+                          +1 Bundle
+                        </button>
+                      ) : null}
+                      <button
+                        className="catalog-single-btn"
+                        type="button"
+                        onTouchStart={triggerAddHaptic}
+                        onPointerDown={triggerAddHaptic}
+                        onClick={() => addToCartWithQty(product, 1)}
+                        disabled={getCatalogStock(product) <= 0}
+                      >
+                        +1 Single
+                      </button>
+                    </div>
+                    <button className="add-feedback-btn" type="button" onTouchStart={triggerAddHaptic} onPointerDown={triggerAddHaptic} onClick={() => addToCart(product)} disabled={getCatalogStock(product) <= 0}>Add Qty</button>
                   </div>
                 </article>
               ))}
             </div>
           </section>
-          <section className="panel">
+          <section className="panel rep-panel rep-cart-panel">
             <h2 className="panel-title"><span className="panel-icon" aria-hidden="true">🛒</span>Cart</h2>
            
-            <div className="list cart-list">
-               <section className="panel">
+            <div className="list cart-list rep-cart-list">
+               <section className="panel rep-cart-inner-panel">
               {cart.length ? cart.map((line) => (
                 <article className="list-row" key={line.productId}>
                   <div className="cart-line-head">
@@ -1349,10 +1424,22 @@ const CashierView = ({
                     <p>{currency(lineBasePrice(line))} each • Item Disc {currency(lineItemDiscount(line))} • Net {currency(lineFinalPrice(line))}</p>
                   </div>
                   <div className="cart-line-controls">
-                    <div className="qty-box">
-                      <button type="button" onClick={() => updateQty(line.productId, line.quantity - 1)}>-</button>
-                      <span>{line.quantity}</span>
-                      <button type="button" onClick={() => updateQty(line.productId, line.quantity + 1)}>+</button>
+                    <div className="rep-cart-qty-cluster">
+                      <div className="qty-box">
+                        <button type="button" onClick={() => updateQty(line.productId, line.quantity - 1)}>-</button>
+                        <span>{line.quantity}</span>
+                        <button type="button" onClick={() => updateQty(line.productId, line.quantity + 1)}>+</button>
+                      </div>
+                      {getBundleSize(line) > 0 ? (
+                        <div className="rep-cart-bundle-actions">
+                          <button type="button" className="rep-cart-bundle-step rep-cart-bundle-step-down" onClick={() => updateQtyByBundle(line, "down")}>
+                            -1 Bundle
+                          </button>
+                          <button type="button" className="rep-cart-bundle-step rep-cart-bundle-step-up" onClick={() => updateQtyByBundle(line, "up")}>
+                            +1 Bundle
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                     <div className="item-discount-wrap">
                       <div className="item-discount-inline">
@@ -1370,7 +1457,7 @@ const CashierView = ({
             
             </section>
             </div>
-            <div className="totals">
+            <div className="totals rep-totals-card">
               <p>Subtotal: {currency(totals.subTotal)}</p>
               <p>Discount: {currency(totals.discountAmount)}</p>
               {appliedCustomerCredit > 0 ? <p>Customer Credit: - {currency(appliedCustomerCredit)}</p> : null}
@@ -1378,9 +1465,9 @@ const CashierView = ({
             </div>
           </section>
 
-          <section className="panel">
+          <section className="panel rep-panel rep-checkout-panel">
             <h2 className="panel-title"><span className="panel-icon" aria-hidden="true">💳</span>Checkout</h2>
-            <div className="form-grid">
+            <div className="form-grid rep-checkout-form">
               <p className="form-hint">Cashier: {cashier || "-"}</p>
               <input
                 value={customerName}
@@ -1404,9 +1491,18 @@ const CashierView = ({
               ) : null}
               {customerName.trim() ? <p className="form-hint outstanding-text">Outstanding: {currency(selectedCustomerOutstanding)}</p> : null}
               {customerName.trim() && selectedCustomerDiscountLimit > 0 ? <p className="form-hint">Discount Limit: {currency(selectedCustomerDiscountLimit)}</p> : null}
+              {customerName.trim() && selectedCustomerBundleDiscountLimit > 0 ? <p className="form-hint">Bundle Discount Limit: {currency(selectedCustomerBundleDiscountLimit)} per bundle</p> : null}
               {customerName.trim() && selectedCustomerDiscountLimit > 0 && cartDiscountTotal > selectedCustomerDiscountLimit ? (
                 <p className="form-hint outstanding-text">Current discount {currency(cartDiscountTotal)} exceeds allowed limit.</p>
               ) : null}
+              {(() => {
+                const violation = findBundleDiscountViolation({ lines: cart, bundleDiscountLimit: selectedCustomerBundleDiscountLimit });
+                return violation ? (
+                  <p className="form-hint outstanding-text">
+                    {violation.lineName} exceeds bundle discount limit. Allowed {currency(violation.allowedBundleDiscount)} for {violation.fullBundles} bundle(s).
+                  </p>
+                ) : null;
+              })()}
               {customerName.trim() && selectedCustomerAvailableCredit > 0 ? (
                 <>
                   <p className="form-hint">Available Credit: {currency(selectedCustomerAvailableCredit)}</p>
@@ -1790,12 +1886,25 @@ const CashierView = ({
                 const discountLimit = (state.customers || [])
                   .filter((item) => String(item.name || "").trim().toLowerCase() === String(saleBeingEdited?.customerName || "").trim().toLowerCase())
                   .reduce((max, item) => Math.max(max, Number(item.discountLimit || 0)), 0);
+                const bundleDiscountLimit = (state.customers || [])
+                  .filter((item) => String(item.name || "").trim().toLowerCase() === String(saleBeingEdited?.customerName || "").trim().toLowerCase())
+                  .reduce((max, item) => Math.max(max, Number(item.bundleDiscountLimit || 0)), 0);
                 const totalDiscount = totalDiscountApplied({ lines: saleEditLines, billDiscount: saleEditBillDiscount });
-                return discountLimit > 0 ? (
-                  <p className={`form-hint rep-sale-edit-title${totalDiscount > discountLimit ? " outstanding-text" : ""}`}>
-                    Discount limit: {currency(discountLimit)} • Current discount: {currency(totalDiscount)}
-                  </p>
-                ) : null;
+                const bundleDiscountViolation = findBundleDiscountViolation({ lines: saleEditLines, bundleDiscountLimit });
+                return (
+                  <>
+                    {discountLimit > 0 ? (
+                      <p className={`form-hint rep-sale-edit-title${totalDiscount > discountLimit ? " outstanding-text" : ""}`}>
+                        Discount limit: {currency(discountLimit)} • Current discount: {currency(totalDiscount)}
+                      </p>
+                    ) : null}
+                    {bundleDiscountLimit > 0 ? (
+                      <p className={`form-hint rep-sale-edit-title${bundleDiscountViolation ? " outstanding-text" : ""}`}>
+                        Bundle discount limit: {currency(bundleDiscountLimit)} per bundle
+                      </p>
+                    ) : null}
+                  </>
+                );
               })()}
               {saleEditLines.map((line) => (
                 <div key={line.productId} className="rep-sale-edit-row">
@@ -2017,7 +2126,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [activePage, setActivePage] = useState("dashboard");
   const [notice, setNotice] = useState("");
 
-  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "" });
+  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "", bundleDiscountLimit: "" });
   const [staffForm, setStaffForm] = useState({ id: "", authUserId: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
   const [stockMode, setStockMode] = useState("add");
   const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
@@ -2374,7 +2483,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const map = new Map();
     for (const sale of state.sales) {
       const key = sale.customerName || "Walk-in";
-      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
+      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
       existing.orders += 1;
       existing.spent += saleNetTotal(sale);
       const saleOutstanding = Number(
@@ -2394,10 +2503,11 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       map.set(key, existing);
     }
     for (const customer of (state.customers || [])) {
-      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
+      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
       const openingOutstanding = Math.max(Number(existing.openingOutstanding || 0), Number(customer.openingOutstanding || 0));
       const creditLimit = Math.max(Number(existing.creditLimit || 0), Number(customer.creditLimit || 0));
       const discountLimit = Math.max(Number(existing.discountLimit || 0), Number(customer.discountLimit || 0));
+      const bundleDiscountLimit = Math.max(Number(existing.bundleDiscountLimit || 0), Number(customer.bundleDiscountLimit || 0));
       const phone = String(customer.phone || "").trim() || String(existing.phone || "").trim();
       const address = String(customer.address || "").trim() || String(existing.address || "").trim();
       const liveOutstanding = Math.max(0, Number(existing.outstanding || 0) - Number(existing.openingOutstanding || 0));
@@ -2412,13 +2522,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         openingOutstanding,
         creditLimit,
         discountLimit,
+        bundleDiscountLimit,
         outstanding: liveOutstanding + openingOutstanding,
         outstandingDaysLeft: aging.daysLeft,
         outstandingDaysLabel: aging.label
       });
     }
     for (const [name, credit] of customerCreditMap.entries()) {
-      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, availableCredit: 0, outstandingDaysLeft: null, outstandingDaysLabel: "-", topOutstandingRep: "" };
+      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, outstandingDaysLeft: null, outstandingDaysLabel: "-", topOutstandingRep: "" };
       existing.availableCredit = Number(credit || 0);
       map.set(name, existing);
     }
@@ -3609,7 +3720,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   };
 
   const openCustomerAdd = () => {
-    setCustomerForm({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "" });
+    setCustomerForm({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "", bundleDiscountLimit: "" });
     setShowCustomerForm(true);
   };
 
@@ -3626,7 +3737,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       address: first.address || "",
       openingOutstanding: first.openingOutstanding ? String(first.openingOutstanding) : "",
       creditLimit: first.creditLimit ? String(first.creditLimit) : "",
-      discountLimit: first.discountLimit ? String(first.discountLimit) : ""
+      discountLimit: first.discountLimit ? String(first.discountLimit) : "",
+      bundleDiscountLimit: first.bundleDiscountLimit ? String(first.bundleDiscountLimit) : ""
     });
     setShowCustomerForm(true);
   };
@@ -3645,7 +3757,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       address: matched.address || row.address || "",
       openingOutstanding: matched.openingOutstanding ? String(matched.openingOutstanding) : "",
       creditLimit: matched.creditLimit ? String(matched.creditLimit) : "",
-      discountLimit: matched.discountLimit ? String(matched.discountLimit) : ""
+      discountLimit: matched.discountLimit ? String(matched.discountLimit) : "",
+      bundleDiscountLimit: matched.bundleDiscountLimit ? String(matched.bundleDiscountLimit) : ""
     });
     setShowCustomerForm(true);
   };
@@ -3662,6 +3775,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const openingOutstanding = Number(customerForm.openingOutstanding || 0);
     const creditLimit = Number(customerForm.creditLimit || 0);
     const discountLimit = Number(customerForm.discountLimit || 0);
+    const bundleDiscountLimit = Number(customerForm.bundleDiscountLimit || 0);
     if (!Number.isFinite(openingOutstanding) || openingOutstanding < 0) {
       setNotice("Opening outstanding must be 0 or more.");
       return;
@@ -3672,6 +3786,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     }
     if (!Number.isFinite(discountLimit) || discountLimit < 0) {
       setNotice("Discount limit must be 0 or more.");
+      return;
+    }
+    if (!Number.isFinite(bundleDiscountLimit) || bundleDiscountLimit < 0) {
+      setNotice("Bundle discount limit must be 0 or more.");
       return;
     }
     const payload = {
@@ -3685,6 +3803,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     if (canManageCustomerLimits) {
       payload.creditLimit = Number(creditLimit.toFixed(2));
       payload.discountLimit = Number(discountLimit.toFixed(2));
+      payload.bundleDiscountLimit = Number(bundleDiscountLimit.toFixed(2));
     }
     const action = customerForm.id ? updateCustomer(customerForm.id, payload) : createCustomer(payload);
     action
@@ -5834,6 +5953,18 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   disabled={!canManageCustomerLimits}
                 />
               </label>
+              <label className="customer-entry-field">
+                <span>Bundle Discount Limit / Bundle (LKR)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={customerForm.bundleDiscountLimit}
+                  onChange={(e) => setCustomerForm((c) => ({ ...c, bundleDiscountLimit: e.target.value }))}
+                  placeholder="Bundle Discount Limit / Bundle (LKR)"
+                  disabled={!canManageCustomerLimits}
+                />
+              </label>
               {!canManageCustomerLimits ? (
                 <p className="form-hint customer-form-lock-note">Manager limited access cannot edit customer details. Enable full access to unlock customer editing.</p>
               ) : null}
@@ -5949,6 +6080,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               <article>
                 <span>Discount Limit (LKR)</span>
                 <strong>{formatLkrValue(customerDetailData.row.discountLimit || 0)}</strong>
+              </article>
+              <article>
+                <span>Bundle Discount / Bundle (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.row.bundleDiscountLimit || 0)}</strong>
               </article>
               <article>
                 <span>Opening Outstanding (LKR)</span>
@@ -6430,7 +6565,7 @@ export const App = () => {
   );
   const discountAmount = useMemo(() => billDiscountValue(discountMode, discountValue, effectiveCartLines), [effectiveCartLines, discountMode, discountValue]);
   const totals = useMemo(() => calculateTotals({ lines: effectiveCartLines, taxRate, discount: discountAmount }), [effectiveCartLines, taxRate, discountAmount]);
-  const selectedBillingCustomer = useMemo(() => {
+const selectedBillingCustomer = useMemo(() => {
     const key = String(customerName || "").trim().toLowerCase();
     if (!key) return null;
     const matches = (state.customers || []).filter((item) => String(item.name || "").trim().toLowerCase() === key);
@@ -6438,10 +6573,12 @@ export const App = () => {
     return matches.reduce((merged, item) => ({
       ...(merged || {}),
       ...item,
-      discountLimit: Math.max(Number(merged?.discountLimit || 0), Number(item.discountLimit || 0))
+      discountLimit: Math.max(Number(merged?.discountLimit || 0), Number(item.discountLimit || 0)),
+      bundleDiscountLimit: Math.max(Number(merged?.bundleDiscountLimit || 0), Number(item.bundleDiscountLimit || 0))
     }), null);
   }, [customerName, state.customers]);
   const selectedCustomerDiscountLimit = useMemo(() => Number(selectedBillingCustomer?.discountLimit || 0), [selectedBillingCustomer?.discountLimit]);
+  const selectedCustomerBundleDiscountLimit = useMemo(() => Number(selectedBillingCustomer?.bundleDiscountLimit || 0), [selectedBillingCustomer?.bundleDiscountLimit]);
   const cartDiscountTotal = useMemo(() => totalDiscountApplied({ lines: effectiveCartLines, billDiscount: discountAmount }), [effectiveCartLines, discountAmount]);
   const customerCreditMap = useMemo(() => {
     const map = new Map();
@@ -6708,6 +6845,11 @@ export const App = () => {
         showErrorModal(`Customer discount limit is ${currency(selectedCustomerDiscountLimit)}. Current discount is ${currency(cartDiscountTotal)}.`);
         return;
       }
+      const bundleDiscountViolation = findBundleDiscountViolation({ lines: effectiveCartLines, bundleDiscountLimit: selectedCustomerBundleDiscountLimit });
+      if (bundleDiscountViolation) {
+        showErrorModal(`${bundleDiscountViolation.lineName} exceeds bundle discount limit. Allowed ${currency(bundleDiscountViolation.allowedBundleDiscount)} for ${bundleDiscountViolation.fullBundles} bundle(s).`);
+        return;
+      }
       const sale = await submitSale({
         requestId: createSaleRequestId(),
         cashier,
@@ -6785,6 +6927,7 @@ export const App = () => {
           discountValue={discountValue}
           setDiscountValue={setDiscountValue}
           selectedCustomerDiscountLimit={selectedCustomerDiscountLimit}
+          selectedCustomerBundleDiscountLimit={selectedCustomerBundleDiscountLimit}
           selectedCustomerAvailableCredit={selectedCustomerAvailableCredit}
           cartDiscountTotal={cartDiscountTotal}
           customerCreditDraft={customerCreditDraft}

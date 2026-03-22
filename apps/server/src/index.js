@@ -169,6 +169,68 @@ const resolveCustomerDiscountLimit = ({ customers = [], customerName = "" }) => 
   );
 };
 
+const extractSizeMl = (value = "") => {
+  const raw = String(value || "").toLowerCase().replace(/\s+/g, "");
+  const match = raw.match(/(\d{3,4})ml/);
+  return match ? Number(match[1]) : 0;
+};
+
+const getBundleSize = (item) => {
+  const name = String(item?.name || item || "").toLowerCase();
+  const category = String(item?.category || "").toLowerCase();
+  const sizeMl = extractSizeMl(item?.size || name);
+  const isWater = name.includes("water") || category.includes("water") || name.includes("aquafina");
+  if (!sizeMl) return 0;
+  if (isWater && sizeMl === 1000) return 15;
+  if (isWater && sizeMl === 1500) return 12;
+  if (isWater && sizeMl === 500) return 24;
+  if (sizeMl === 200) return 24;
+  if (sizeMl === 250) return 30;
+  if (sizeMl === 300) return 24;
+  if (sizeMl === 400) return 24;
+  if (sizeMl === 1000) return 12;
+  if (sizeMl === 1500) return 12;
+  if (sizeMl === 2000) return 9;
+  return 0;
+};
+
+const resolveCustomerBundleDiscountLimit = ({ customers = [], customerName = "" }) => {
+  const key = String(customerName || "").trim().toLowerCase();
+  if (!key || key === "walk-in") return 0;
+  return roundMoney(
+    (customers || [])
+      .filter((customer) => String(customer?.name || "").trim().toLowerCase() === key)
+      .reduce((max, customer) => Math.max(max, Number(customer?.bundleDiscountLimit || 0)), 0)
+  );
+};
+
+const findBundleDiscountViolation = ({ lines = [], bundleDiscountLimit = 0 }) => {
+  const limit = roundMoney(bundleDiscountLimit);
+  if (!(limit > 0)) return null;
+  for (const line of (lines || [])) {
+    const qty = Math.max(0, Number(line?.quantity || 0));
+    const bundleSize = getBundleSize(line);
+    if (!(bundleSize > 0) || !(qty >= bundleSize)) continue;
+    const fullBundles = Math.floor(qty / bundleSize);
+    if (!(fullBundles > 0)) continue;
+    const unitDiscount = roundMoney(Math.max(0, Number(line?.basePrice || 0) - Number(line?.price || 0)));
+    if (!(unitDiscount > 0)) continue;
+    const eligibleUnits = fullBundles * bundleSize;
+    const actualBundleDiscount = roundMoney(unitDiscount * eligibleUnits);
+    const allowedBundleDiscount = roundMoney(fullBundles * limit);
+    if (actualBundleDiscount > allowedBundleDiscount) {
+      return {
+        lineName: String(line?.name || "").trim() || "Item",
+        fullBundles,
+        bundleSize,
+        actualBundleDiscount,
+        allowedBundleDiscount
+      };
+    }
+  }
+  return null;
+};
+
 const calculateSaleDiscountTotal = ({ lines = [], billDiscount = 0 }) => {
   const lineDiscountTotal = roundMoney((lines || []).reduce((acc, line) => {
     const base = Number(line?.basePrice || 0);
@@ -553,6 +615,7 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
   const rawOpeningOutstanding = Number(body.openingOutstanding || 0);
   const rawCreditLimit = Number(body.creditLimit || 0);
   const rawDiscountLimit = Number(body.discountLimit || 0);
+  const rawBundleDiscountLimit = Number(body.bundleDiscountLimit || 0);
   const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
     ? roundMoney(rawOpeningOutstanding)
     : 0;
@@ -561,6 +624,9 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
     : 0;
   const discountLimit = Number.isFinite(rawDiscountLimit) && rawDiscountLimit > 0
     ? roundMoney(rawDiscountLimit)
+    : 0;
+  const bundleDiscountLimit = Number.isFinite(rawBundleDiscountLimit) && rawBundleDiscountLimit > 0
+    ? roundMoney(rawBundleDiscountLimit)
     : 0;
   if (!name) {
     res.status(400).json({ message: "Customer name is required" });
@@ -582,6 +648,7 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
     openingOutstanding: canManageOpeningOutstanding ? openingOutstanding : 0,
     creditLimit: canManageCustomerLimits ? creditLimit : 0,
     discountLimit: canManageCustomerLimits ? discountLimit : 0,
+    bundleDiscountLimit: canManageCustomerLimits ? bundleDiscountLimit : 0,
     createdAt: new Date().toISOString()
   };
 
@@ -605,9 +672,11 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
   const hasOpeningOutstanding = Object.prototype.hasOwnProperty.call(body, "openingOutstanding");
   const hasCreditLimit = Object.prototype.hasOwnProperty.call(body, "creditLimit");
   const hasDiscountLimit = Object.prototype.hasOwnProperty.call(body, "discountLimit");
+  const hasBundleDiscountLimit = Object.prototype.hasOwnProperty.call(body, "bundleDiscountLimit");
   const rawOpeningOutstanding = Number(body.openingOutstanding || 0);
   const rawCreditLimit = Number(body.creditLimit || 0);
   const rawDiscountLimit = Number(body.discountLimit || 0);
+  const rawBundleDiscountLimit = Number(body.bundleDiscountLimit || 0);
   const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
     ? roundMoney(rawOpeningOutstanding)
     : 0;
@@ -616,6 +685,9 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
     : 0;
   const discountLimit = Number.isFinite(rawDiscountLimit) && rawDiscountLimit > 0
     ? roundMoney(rawDiscountLimit)
+    : 0;
+  const bundleDiscountLimit = Number.isFinite(rawBundleDiscountLimit) && rawBundleDiscountLimit > 0
+    ? roundMoney(rawBundleDiscountLimit)
     : 0;
 
   const next = updateState((state) => {
@@ -635,7 +707,8 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
         address: body.address !== undefined ? String(body.address || "").trim() : state.customers[idx].address,
         ...(hasOpeningOutstanding ? { openingOutstanding } : {}),
         ...(hasCreditLimit ? { creditLimit } : {}),
-        ...(hasDiscountLimit ? { discountLimit } : {})
+        ...(hasDiscountLimit ? { discountLimit } : {}),
+        ...(hasBundleDiscountLimit ? { bundleDiscountLimit } : {})
       };
     } else {
       state.customers[idx] = {
@@ -643,7 +716,8 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
         ...body,
         ...(hasOpeningOutstanding ? { openingOutstanding } : {}),
         ...(hasCreditLimit ? { creditLimit } : {}),
-        ...(hasDiscountLimit ? { discountLimit } : {})
+        ...(hasDiscountLimit ? { discountLimit } : {}),
+        ...(hasBundleDiscountLimit ? { bundleDiscountLimit } : {})
       };
     }
     return state;
@@ -859,6 +933,8 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
     preparedLines.push({
       productId: product.id,
       name: line.name || `${product.name}${product.size ? ` ${product.size}` : ""}`,
+      size: product.size || "",
+      category: product.category || "",
       quantity,
       basePrice: Number(basePrice.toFixed(2)),
       itemDiscount: Number(discountAmount.toFixed(2)),
@@ -885,9 +961,15 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
 
   const preparedCustomerName = String(prepared.customerName || "").trim();
   const customerDiscountLimit = resolveCustomerDiscountLimit({ customers: state.customers || [], customerName: preparedCustomerName });
+  const customerBundleDiscountLimit = resolveCustomerBundleDiscountLimit({ customers: state.customers || [], customerName: preparedCustomerName });
   const totalDiscountApplied = calculateSaleDiscountTotal({ lines: prepared.lines, billDiscount: prepared.discountAmount ?? prepared.discount ?? 0 });
   if (String(req.user?.role || "").toLowerCase() === "cashier" && customerDiscountLimit > 0 && totalDiscountApplied > customerDiscountLimit) {
     res.status(409).json({ message: `Discount limit exceeded for ${preparedCustomerName}. Allowed: ${customerDiscountLimit.toFixed(2)}` });
+    return;
+  }
+  const bundleDiscountViolation = findBundleDiscountViolation({ lines: prepared.lines, bundleDiscountLimit: customerBundleDiscountLimit });
+  if (String(req.user?.role || "").toLowerCase() === "cashier" && bundleDiscountViolation) {
+    res.status(409).json({ message: `${bundleDiscountViolation.lineName} exceeds bundle discount limit. Allowed: ${bundleDiscountViolation.allowedBundleDiscount.toFixed(2)} for ${bundleDiscountViolation.fullBundles} bundle(s)` });
     return;
   }
   if (customerCreditAmount > 0) {
@@ -1067,6 +1149,8 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin", "manager"),
     preparedLines.push({
       productId,
       name: line.name || `${product.name}${product.size ? ` ${product.size}` : ""}`,
+      size: product.size || "",
+      category: product.category || "",
       quantity,
       basePrice: Number(basePrice.toFixed(2)),
       itemDiscount: Number(discountAmount.toFixed(2)),
@@ -1096,9 +1180,15 @@ app.patch("/sales/:id", requireAuth, requireRole("cashier", "admin", "manager"),
     return;
   }
   const customerDiscountLimit = resolveCustomerDiscountLimit({ customers: state.customers || [], customerName: sale.customerName });
+  const customerBundleDiscountLimit = resolveCustomerBundleDiscountLimit({ customers: state.customers || [], customerName: sale.customerName });
   const totalDiscountApplied = calculateSaleDiscountTotal({ lines: preparedLines, billDiscount: nextBillDiscount });
   if (!isAdmin && customerDiscountLimit > 0 && totalDiscountApplied > customerDiscountLimit) {
     res.status(409).json({ message: `Discount limit exceeded for ${sale.customerName}. Allowed: ${customerDiscountLimit.toFixed(2)}` });
+    return;
+  }
+  const bundleDiscountViolation = findBundleDiscountViolation({ lines: preparedLines, bundleDiscountLimit: customerBundleDiscountLimit });
+  if (!isAdmin && bundleDiscountViolation) {
+    res.status(409).json({ message: `${bundleDiscountViolation.lineName} exceeds bundle discount limit. Allowed: ${bundleDiscountViolation.allowedBundleDiscount.toFixed(2)} for ${bundleDiscountViolation.fullBundles} bundle(s)` });
     return;
   }
 
