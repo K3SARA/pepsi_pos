@@ -616,6 +616,8 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
   const rawCreditLimit = Number(body.creditLimit || 0);
   const rawDiscountLimit = Number(body.discountLimit || 0);
   const rawBundleDiscountLimit = Number(body.bundleDiscountLimit || 0);
+  const rawOutstandingAdjustment = Number(body.outstandingAdjustment || 0);
+  const outstandingAdjustmentReason = String(body.outstandingAdjustmentReason || "").trim().slice(0, 240);
   const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
     ? roundMoney(rawOpeningOutstanding)
     : 0;
@@ -627,6 +629,9 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
     : 0;
   const bundleDiscountLimit = Number.isFinite(rawBundleDiscountLimit) && rawBundleDiscountLimit > 0
     ? roundMoney(rawBundleDiscountLimit)
+    : 0;
+  const outstandingAdjustment = Number.isFinite(rawOutstandingAdjustment) && rawOutstandingAdjustment > 0
+    ? roundMoney(rawOutstandingAdjustment)
     : 0;
   if (!name) {
     res.status(400).json({ message: "Customer name is required" });
@@ -640,6 +645,7 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
   const role = String(req.user?.role || "").toLowerCase();
   const canManageOpeningOutstanding = role === "admin" || (role === "manager" && managerHasFullAccess());
   const canManageCustomerLimits = role === "admin" || (role === "manager" && managerHasFullAccess());
+  const canManageOutstandingAdjustment = role === "admin";
   const record = {
     id: nanoid(12),
     name,
@@ -649,6 +655,8 @@ app.post("/customers", requireAuth, requireRole("admin", "cashier", "manager"), 
     creditLimit: canManageCustomerLimits ? creditLimit : 0,
     discountLimit: canManageCustomerLimits ? discountLimit : 0,
     bundleDiscountLimit: canManageCustomerLimits ? bundleDiscountLimit : 0,
+    outstandingAdjustment: canManageOutstandingAdjustment ? outstandingAdjustment : 0,
+    outstandingAdjustmentReason: canManageOutstandingAdjustment ? outstandingAdjustmentReason : "",
     createdAt: new Date().toISOString()
   };
 
@@ -673,10 +681,14 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
   const hasCreditLimit = Object.prototype.hasOwnProperty.call(body, "creditLimit");
   const hasDiscountLimit = Object.prototype.hasOwnProperty.call(body, "discountLimit");
   const hasBundleDiscountLimit = Object.prototype.hasOwnProperty.call(body, "bundleDiscountLimit");
+  const hasOutstandingAdjustment = Object.prototype.hasOwnProperty.call(body, "outstandingAdjustment");
+  const hasOutstandingAdjustmentReason = Object.prototype.hasOwnProperty.call(body, "outstandingAdjustmentReason");
   const rawOpeningOutstanding = Number(body.openingOutstanding || 0);
   const rawCreditLimit = Number(body.creditLimit || 0);
   const rawDiscountLimit = Number(body.discountLimit || 0);
   const rawBundleDiscountLimit = Number(body.bundleDiscountLimit || 0);
+  const rawOutstandingAdjustment = Number(body.outstandingAdjustment || 0);
+  const outstandingAdjustmentReason = String(body.outstandingAdjustmentReason || "").trim().slice(0, 240);
   const openingOutstanding = Number.isFinite(rawOpeningOutstanding) && rawOpeningOutstanding > 0
     ? roundMoney(rawOpeningOutstanding)
     : 0;
@@ -689,6 +701,13 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
   const bundleDiscountLimit = Number.isFinite(rawBundleDiscountLimit) && rawBundleDiscountLimit > 0
     ? roundMoney(rawBundleDiscountLimit)
     : 0;
+  const outstandingAdjustment = Number.isFinite(rawOutstandingAdjustment) && rawOutstandingAdjustment > 0
+    ? roundMoney(rawOutstandingAdjustment)
+    : 0;
+  if ((hasOutstandingAdjustment || hasOutstandingAdjustmentReason) && String(req.user?.role || "").toLowerCase() !== "admin") {
+    res.status(403).json({ message: "Only admin can adjust total outstanding" });
+    return;
+  }
 
   const next = updateState((state) => {
     state.customers = state.customers || [];
@@ -717,7 +736,9 @@ app.patch("/customers/:id", requireAuth, requireRole("admin", "cashier", "manage
         ...(hasOpeningOutstanding ? { openingOutstanding } : {}),
         ...(hasCreditLimit ? { creditLimit } : {}),
         ...(hasDiscountLimit ? { discountLimit } : {}),
-        ...(hasBundleDiscountLimit ? { bundleDiscountLimit } : {})
+        ...(hasBundleDiscountLimit ? { bundleDiscountLimit } : {}),
+        ...(hasOutstandingAdjustment ? { outstandingAdjustment } : {}),
+        ...(hasOutstandingAdjustmentReason ? { outstandingAdjustmentReason } : {})
       };
     }
     return state;

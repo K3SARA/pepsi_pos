@@ -1137,6 +1137,80 @@ button:disabled {
   padding: 0.65rem 0.2rem 0.1rem;
 }
 
+.rep-productivity-panel {
+  background:
+    radial-gradient(circle at top right, rgba(185, 229, 255, 0.46), transparent 34%),
+    linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
+  border-color: #d8e5f0;
+}
+
+.rep-productivity-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 0.9rem;
+  margin-bottom: 0.85rem;
+}
+
+.rep-productivity-head h2 {
+  margin-bottom: 0.2rem;
+}
+
+.rep-productivity-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(140px, 1fr));
+  gap: 0.55rem;
+}
+
+.rep-productivity-filters label {
+  display: grid;
+  gap: 0.24rem;
+}
+
+.rep-productivity-filters span {
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: #56708c;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.rep-productivity-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(140px, 1fr));
+  gap: 0.7rem;
+}
+
+.rep-productivity-grid article {
+  padding: 0.82rem 0.88rem;
+  border-radius: 16px;
+  border: 1px solid #d8e3ef;
+  background: linear-gradient(180deg, #ffffff 0%, #edf5ff 100%);
+  box-shadow: 0 12px 24px rgba(18, 40, 68, 0.06);
+}
+
+.rep-productivity-grid span {
+  display: block;
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: #56708c;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.rep-productivity-grid strong {
+  display: block;
+  margin-top: 0.28rem;
+  font-size: 1.18rem;
+  color: #102947;
+  line-height: 1.2;
+}
+
+.rep-productivity-foot {
+  margin-top: 0.85rem;
+  font-weight: 700;
+}
+
 .rep-stock-metrics {
   display: grid;
   grid-template-columns: repeat(3, minmax(120px, 1fr));
@@ -5815,6 +5889,21 @@ button:disabled {
     flex-direction: column;
     align-items: flex-start;
     gap: 0.35rem;
+  }
+
+  .rep-productivity-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.65rem;
+  }
+
+  .rep-productivity-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .rep-productivity-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.6rem;
   }
 
   .rep-customers-head p {

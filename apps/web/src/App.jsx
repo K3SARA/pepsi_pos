@@ -423,6 +423,13 @@ const localDateKey = (value) => {
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 };
+const inDateRange = (iso, from, to) => {
+  const day = toColomboDateKey(iso);
+  if (!day) return false;
+  if (from && day < from) return false;
+  if (to && day > to) return false;
+  return true;
+};
 
 const openSaleReceiptPrint = ({
   sale,
@@ -740,6 +747,18 @@ const CashierView = ({
     }
     return map;
   }, [state.customers]);
+  const customerOutstandingAdjustmentMap = useMemo(() => {
+    const map = new Map();
+    for (const customer of (state.customers || [])) {
+      const key = String(customer.name || "").trim();
+      if (!key) continue;
+      const adjustment = Number(customer.outstandingAdjustment || 0);
+      if (adjustment > 0) {
+        map.set(key, Math.max(Number(map.get(key) || 0), adjustment));
+      }
+    }
+    return map;
+  }, [state.customers]);
   const customerOutstandingMap = useMemo(() => {
     const map = new Map(customerOpeningOutstandingMap);
     for (const sale of (state.sales || [])) {
@@ -754,8 +773,11 @@ const CashierView = ({
         map.set(key, (map.get(key) || 0) + outstanding);
       }
     }
+    for (const [key, adjustment] of customerOutstandingAdjustmentMap.entries()) {
+      map.set(key, Math.max(0, Number((Number(map.get(key) || 0) - Number(adjustment || 0)).toFixed(2))));
+    }
     return map;
-  }, [state.sales, customerOpeningOutstandingMap]);
+  }, [state.sales, customerOpeningOutstandingMap, customerOutstandingAdjustmentMap]);
   const selectedCustomerOutstanding = useMemo(() => {
     const key = String(customerName || "").trim();
     if (!key) return 0;
@@ -775,6 +797,8 @@ const CashierView = ({
     }
     return { orders, revenue: Number(revenue.toFixed(2)) };
   }, [cashier, state.sales]);
+  const [repProductivityDateFrom, setRepProductivityDateFrom] = useState(() => toColomboDateKey());
+  const [repProductivityDateTo, setRepProductivityDateTo] = useState(() => toColomboDateKey());
 
   const damagedQtyByProduct = useMemo(() => {
     const map = new Map();
@@ -889,7 +913,9 @@ const CashierView = ({
       address: String(item.address || "").trim() || String(merged?.address || "").trim(),
       openingOutstanding: Math.max(Number(merged?.openingOutstanding || 0), Number(item.openingOutstanding || 0)),
       creditLimit: Math.max(Number(merged?.creditLimit || 0), Number(item.creditLimit || 0)),
-      discountLimit: Math.max(Number(merged?.discountLimit || 0), Number(item.discountLimit || 0))
+      discountLimit: Math.max(Number(merged?.discountLimit || 0), Number(item.discountLimit || 0)),
+      outstandingAdjustment: Math.max(Number(merged?.outstandingAdjustment || 0), Number(item.outstandingAdjustment || 0)),
+      outstandingAdjustmentReason: String(item.outstandingAdjustmentReason || "").trim() || String(merged?.outstandingAdjustmentReason || "").trim()
     }), null);
   }, [customerName, state.customers]);
   const [customerPhoneDraft, setCustomerPhoneDraft] = useState("");
@@ -1150,6 +1176,38 @@ const CashierView = ({
       .filter((sale) => String(sale.cashier || "").trim().toLowerCase() === rep)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }, [cashier, state.sales]);
+  const repProductivitySales = useMemo(
+    () => repSales.filter((sale) => inDateRange(sale.createdAt, repProductivityDateFrom, repProductivityDateTo)),
+    [repSales, repProductivityDateFrom, repProductivityDateTo]
+  );
+  const repProductivityStats = useMemo(() => {
+    const customerSet = new Set();
+    let value = 0;
+    let qty = 0;
+    let bundles = 0;
+    let singles = 0;
+    for (const sale of repProductivitySales) {
+      customerSet.add(String(sale.customerName || "Walk-in").trim() || "Walk-in");
+      value += saleNetTotal(sale);
+      const returnedByProduct = saleReturnedQtyByProduct(sale, state.returns || []);
+      const undeliveredByProduct = saleUndeliveredQtyByProduct(sale);
+      for (const line of (sale.lines || [])) {
+        const lineState = effectiveSaleLineState(sale, line, { returnedByProduct, undeliveredByProduct });
+        qty += lineState.effectiveQty;
+        const breakdown = getBundleBreakdown({ ...line, qty: lineState.effectiveQty });
+        bundles += Number(breakdown.bundles || 0);
+        singles += Number(breakdown.singles || 0);
+      }
+    }
+    return {
+      orders: repProductivitySales.length,
+      value: Number(value.toFixed(2)),
+      qty,
+      bundles,
+      singles,
+      customers: customerSet.size
+    };
+  }, [repProductivitySales, state.returns]);
   const repCompareRows = useMemo(() => {
     const map = new Map();
     for (const sale of (state.sales || [])) {
@@ -1743,6 +1801,51 @@ const CashierView = ({
 
       {cashierPage === "sales" ? (
         <main className="grid">
+          <section className="panel rep-productivity-panel">
+            <div className="rep-productivity-head">
+              <div>
+                <h2>My Productivity</h2>
+                <p className="form-hint">Track your orders, value, bundles, and singles by date range.</p>
+              </div>
+              <div className="rep-productivity-filters">
+                <label>
+                  <span>From</span>
+                  <input type="date" value={repProductivityDateFrom} onChange={(e) => setRepProductivityDateFrom(e.target.value)} />
+                </label>
+                <label>
+                  <span>To</span>
+                  <input type="date" value={repProductivityDateTo} onChange={(e) => setRepProductivityDateTo(e.target.value)} />
+                </label>
+              </div>
+            </div>
+            <div className="rep-productivity-grid">
+              <article>
+                <span>Orders</span>
+                <strong>{repProductivityStats.orders}</strong>
+              </article>
+              <article>
+                <span>Value</span>
+                <strong>{currency(repProductivityStats.value)}</strong>
+              </article>
+              <article>
+                <span>Total Qty</span>
+                <strong>{repProductivityStats.qty}</strong>
+              </article>
+              <article>
+                <span>Bundles</span>
+                <strong>{repProductivityStats.bundles}</strong>
+              </article>
+              <article>
+                <span>Singles</span>
+                <strong>{repProductivityStats.singles}</strong>
+              </article>
+              <article>
+                <span>Customers</span>
+                <strong>{repProductivityStats.customers}</strong>
+              </article>
+            </div>
+            <p className="form-hint rep-productivity-foot">Today quick view: {repSessionStats.orders} orders • {currency(repSessionStats.revenue)}</p>
+          </section>
           <section className="panel rep-sales-panel">
             <h2>My Sales</h2>
             <div className="list rep-sales-list">
@@ -1811,12 +1914,6 @@ const CashierView = ({
                 </article>
               ))}
             </div>
-          </section>
-          <section className="panel">
-            <h2>Session</h2>
-            <p>Cashier: {cashier}</p>
-            <p>Today orders: {repSessionStats.orders}</p>
-            <p>Today revenue: {currency(repSessionStats.revenue)}</p>
           </section>
         </main>
       ) : null}
@@ -2126,7 +2223,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [activePage, setActivePage] = useState("dashboard");
   const [notice, setNotice] = useState("");
 
-  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "", bundleDiscountLimit: "" });
+  const [customerForm, setCustomerForm] = useState({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "", bundleDiscountLimit: "", outstandingAdjustment: "", outstandingAdjustmentReason: "" });
   const [staffForm, setStaffForm] = useState({ id: "", authUserId: "", name: "", role: "", phone: "", username: "", password: "", authRole: "cashier" });
   const [stockMode, setStockMode] = useState("add");
   const [stockForm, setStockForm] = useState({ productId: "", quantity: "", stock: "", sku: "", invoicePrice: "", billingPrice: "", mrp: "" });
@@ -2167,11 +2264,13 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [reportMenuOpen, setReportMenuOpen] = useState(false);
   const reportMenuRef = useRef(null);
   const isManager = String(user?.role || "").toLowerCase() === "manager";
+  const isAdmin = String(user?.role || "").toLowerCase() === "admin";
   const managerFullAccessEnabled = Boolean(state?.settings?.managerFullAccess);
   const canManageStock = !isManager || managerFullAccessEnabled;
   const canManageCustomerOpeningOutstanding = !isManager || managerFullAccessEnabled;
   const canManageCustomerLimits = !isManager || managerFullAccessEnabled;
   const canManageUsers = !isManager || managerFullAccessEnabled;
+  const canManageOutstandingAdjustment = isAdmin;
 
   useEffect(() => {
     if (!notice) return;
@@ -2211,13 +2310,6 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       .catch(() => setAuthUsers([]));
   }, [canManageUsers, state.staff]);
 
-  const inDateRange = (iso, from, to) => {
-    const day = toColomboDateKey(iso);
-    if (!day) return false;
-    if (from && day < from) return false;
-    if (to && day > to) return false;
-    return true;
-  };
   const inDateTimeRange = (iso, fromDate, toDate, fromTime, toTime) => {
     const value = new Date(iso).getTime();
     if (Number.isNaN(value)) return false;
@@ -2483,7 +2575,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const map = new Map();
     for (const sale of state.sales) {
       const key = sale.customerName || "Walk-in";
-      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
+      const existing = map.get(key) || { name: key, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, outstandingAdjustment: 0, outstandingAdjustmentReason: "", liveOutstandingRaw: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
       existing.orders += 1;
       existing.spent += saleNetTotal(sale);
       const saleOutstanding = Number(
@@ -2492,6 +2584,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
           : (sale.paymentType === "credit" ? saleNetTotal(sale) : 0)
       ) || 0;
       existing.outstanding += saleOutstanding;
+      existing.liveOutstandingRaw += saleOutstanding;
       if (saleOutstanding > 0) {
         const currentOldest = existing.oldestOutstandingSale ? new Date(existing.oldestOutstandingSale.createdAt || 0).getTime() : Infinity;
         const candidate = new Date(sale.createdAt || 0).getTime();
@@ -2503,14 +2596,16 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       map.set(key, existing);
     }
     for (const customer of (state.customers || [])) {
-      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
+      const existing = map.get(customer.name) || { name: customer.name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, outstandingAdjustment: 0, outstandingAdjustmentReason: "", liveOutstandingRaw: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, phone: "", address: "", oldestOutstandingSale: null, topOutstandingRep: "" };
       const openingOutstanding = Math.max(Number(existing.openingOutstanding || 0), Number(customer.openingOutstanding || 0));
+      const outstandingAdjustment = Math.max(Number(existing.outstandingAdjustment || 0), Number(customer.outstandingAdjustment || 0));
+      const outstandingAdjustmentReason = String(customer.outstandingAdjustmentReason || "").trim() || String(existing.outstandingAdjustmentReason || "").trim();
       const creditLimit = Math.max(Number(existing.creditLimit || 0), Number(customer.creditLimit || 0));
       const discountLimit = Math.max(Number(existing.discountLimit || 0), Number(customer.discountLimit || 0));
       const bundleDiscountLimit = Math.max(Number(existing.bundleDiscountLimit || 0), Number(customer.bundleDiscountLimit || 0));
       const phone = String(customer.phone || "").trim() || String(existing.phone || "").trim();
       const address = String(customer.address || "").trim() || String(existing.address || "").trim();
-      const liveOutstanding = Math.max(0, Number(existing.outstanding || 0) - Number(existing.openingOutstanding || 0));
+      const liveOutstanding = Math.max(0, Number(existing.liveOutstandingRaw || 0));
       const aging = existing.oldestOutstandingSale
         ? customerOutstandingAging(existing.oldestOutstandingSale)
         : (openingOutstanding > 0 ? { daysLeft: null, label: "Opening due" } : { daysLeft: null, label: "-" });
@@ -2520,16 +2615,19 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         phone,
         address,
         openingOutstanding,
+        outstandingAdjustment,
+        outstandingAdjustmentReason,
         creditLimit,
         discountLimit,
         bundleDiscountLimit,
-        outstanding: liveOutstanding + openingOutstanding,
+        liveOutstandingRaw: liveOutstanding,
+        outstanding: Math.max(0, Number((liveOutstanding + openingOutstanding - outstandingAdjustment).toFixed(2))),
         outstandingDaysLeft: aging.daysLeft,
         outstandingDaysLabel: aging.label
       });
     }
     for (const [name, credit] of customerCreditMap.entries()) {
-      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, outstandingDaysLeft: null, outstandingDaysLabel: "-", topOutstandingRep: "" };
+      const existing = map.get(name) || { name, orders: 0, spent: 0, outstanding: 0, openingOutstanding: 0, outstandingAdjustment: 0, outstandingAdjustmentReason: "", liveOutstandingRaw: 0, creditLimit: 0, discountLimit: 0, bundleDiscountLimit: 0, availableCredit: 0, outstandingDaysLeft: null, outstandingDaysLabel: "-", topOutstandingRep: "" };
       existing.availableCredit = Number(credit || 0);
       map.set(name, existing);
     }
@@ -2738,7 +2836,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       averageBillValue,
       lastSaleAt: sales[0]?.createdAt || "",
       openingOutstanding: Number(row.openingOutstanding || 0),
-      liveSaleOutstanding: Math.max(0, Number(row.outstanding || 0) - Number(row.openingOutstanding || 0)),
+      outstandingAdjustment: Number(row.outstandingAdjustment || 0),
+      outstandingAdjustmentReason: String(row.outstandingAdjustmentReason || "").trim(),
+      liveSaleOutstanding: Number(row.liveOutstandingRaw || 0),
       availableCredit: Number(row.availableCredit || 0),
       recentSales: sales.slice(0, 4)
     };
@@ -3720,7 +3820,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   };
 
   const openCustomerAdd = () => {
-    setCustomerForm({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "", bundleDiscountLimit: "" });
+    setCustomerForm({ id: "", name: "", phone: "", address: "", openingOutstanding: "", creditLimit: "", discountLimit: "", bundleDiscountLimit: "", outstandingAdjustment: "", outstandingAdjustmentReason: "" });
     setShowCustomerForm(true);
   };
 
@@ -3738,7 +3838,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       openingOutstanding: first.openingOutstanding ? String(first.openingOutstanding) : "",
       creditLimit: first.creditLimit ? String(first.creditLimit) : "",
       discountLimit: first.discountLimit ? String(first.discountLimit) : "",
-      bundleDiscountLimit: first.bundleDiscountLimit ? String(first.bundleDiscountLimit) : ""
+      bundleDiscountLimit: first.bundleDiscountLimit ? String(first.bundleDiscountLimit) : "",
+      outstandingAdjustment: first.outstandingAdjustment ? String(first.outstandingAdjustment) : "",
+      outstandingAdjustmentReason: first.outstandingAdjustmentReason || ""
     });
     setShowCustomerForm(true);
   };
@@ -3758,7 +3860,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       openingOutstanding: matched.openingOutstanding ? String(matched.openingOutstanding) : "",
       creditLimit: matched.creditLimit ? String(matched.creditLimit) : "",
       discountLimit: matched.discountLimit ? String(matched.discountLimit) : "",
-      bundleDiscountLimit: matched.bundleDiscountLimit ? String(matched.bundleDiscountLimit) : ""
+      bundleDiscountLimit: matched.bundleDiscountLimit ? String(matched.bundleDiscountLimit) : "",
+      outstandingAdjustment: matched.outstandingAdjustment ? String(matched.outstandingAdjustment) : "",
+      outstandingAdjustmentReason: matched.outstandingAdjustmentReason || ""
     });
     setShowCustomerForm(true);
   };
@@ -3776,6 +3880,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     const creditLimit = Number(customerForm.creditLimit || 0);
     const discountLimit = Number(customerForm.discountLimit || 0);
     const bundleDiscountLimit = Number(customerForm.bundleDiscountLimit || 0);
+    const outstandingAdjustment = Number(customerForm.outstandingAdjustment || 0);
+    const outstandingAdjustmentReason = String(customerForm.outstandingAdjustmentReason || "").trim();
     if (!Number.isFinite(openingOutstanding) || openingOutstanding < 0) {
       setNotice("Opening outstanding must be 0 or more.");
       return;
@@ -3792,6 +3898,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       setNotice("Bundle discount limit must be 0 or more.");
       return;
     }
+    if (!Number.isFinite(outstandingAdjustment) || outstandingAdjustment < 0) {
+      setNotice("Outstanding adjustment must be 0 or more.");
+      return;
+    }
     const payload = {
       name: customerForm.name.trim(),
       phone: customerForm.phone,
@@ -3804,6 +3914,10 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       payload.creditLimit = Number(creditLimit.toFixed(2));
       payload.discountLimit = Number(discountLimit.toFixed(2));
       payload.bundleDiscountLimit = Number(bundleDiscountLimit.toFixed(2));
+    }
+    if (canManageOutstandingAdjustment) {
+      payload.outstandingAdjustment = Number(outstandingAdjustment.toFixed(2));
+      payload.outstandingAdjustmentReason = outstandingAdjustmentReason;
     }
     const action = customerForm.id ? updateCustomer(customerForm.id, payload) : createCustomer(payload);
     action
@@ -5965,8 +6079,32 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   disabled={!canManageCustomerLimits}
                 />
               </label>
+              <label className="customer-entry-field">
+                <span>Outstanding Reduction / Write-off (LKR)</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={customerForm.outstandingAdjustment}
+                  onChange={(e) => setCustomerForm((c) => ({ ...c, outstandingAdjustment: e.target.value }))}
+                  placeholder="Outstanding Reduction / Write-off (LKR)"
+                  disabled={!canManageOutstandingAdjustment}
+                />
+              </label>
+              <label className="customer-entry-field">
+                <span>Reduction Reason</span>
+                <input
+                  value={customerForm.outstandingAdjustmentReason}
+                  onChange={(e) => setCustomerForm((c) => ({ ...c, outstandingAdjustmentReason: e.target.value }))}
+                  placeholder="Reason for reducing outstanding"
+                  disabled={!canManageOutstandingAdjustment}
+                />
+              </label>
               {!canManageCustomerLimits ? (
                 <p className="form-hint customer-form-lock-note">Manager limited access cannot edit customer details. Enable full access to unlock customer editing.</p>
+              ) : null}
+              {!canManageOutstandingAdjustment ? (
+                <p className="form-hint customer-form-lock-note">Only admin can reduce or write off total outstanding.</p>
               ) : null}
               <label className="customer-entry-field customer-entry-field-full">
                 <span>Address</span>
@@ -6088,6 +6226,14 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               <article>
                 <span>Opening Outstanding (LKR)</span>
                 <strong>{formatLkrValue(customerDetailData.openingOutstanding || 0)}</strong>
+              </article>
+              <article>
+                <span>Outstanding Reduction (LKR)</span>
+                <strong>{formatLkrValue(customerDetailData.outstandingAdjustment || 0)}</strong>
+              </article>
+              <article>
+                <span>Reduction Reason</span>
+                <strong>{customerDetailData.outstandingAdjustmentReason || "-"}</strong>
               </article>
               <article className={Number(customerDetailData.row.outstanding || 0) > 0 ? "warn" : ""}>
                 <span>Outstanding (LKR)</span>
