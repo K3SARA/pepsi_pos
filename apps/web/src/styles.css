@@ -380,9 +380,43 @@ button {
 .search-icon-input {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23627a97' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.5-3.5'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-size: 14px 14px;
-  background-position: 0.7rem center;
-  padding-left: 2.1rem !important;
+  background-size: 16px 16px;
+  background-position: 0.95rem center;
+  padding-left: 2.7rem !important;
+}
+
+.imperfect-search-input {
+  width: 100%;
+  margin: 0.72rem 0 0.82rem;
+  min-height: 46px;
+  border: 1px solid #c7d7ea !important;
+  border-radius: 999px !important;
+  background:
+    radial-gradient(circle at top right, rgba(214, 229, 255, 0.4), transparent 36%),
+    linear-gradient(180deg, #ffffff 0%, #f5f9ff 100%);
+  box-shadow:
+    0 8px 18px rgba(18, 40, 68, 0.05),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  color: #183250;
+  font-weight: 700;
+  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+.imperfect-search-input::placeholder {
+  color: #5d7593;
+  font-weight: 700;
+}
+
+.imperfect-search-input:focus {
+  outline: none;
+  border-color: #9ec3ef !important;
+  box-shadow:
+    0 0 0 4px rgba(138, 186, 240, 0.18),
+    0 10px 22px rgba(18, 40, 68, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96);
+  background:
+    radial-gradient(circle at top right, rgba(222, 235, 255, 0.5), transparent 36%),
+    linear-gradient(180deg, #ffffff 0%, #f7fbff 100%);
 }
 
 .form-grid {
@@ -5645,6 +5679,13 @@ button:disabled {
     border-radius: 12px;
     padding: 0.7rem;
     border-color: #d5dfeb;
+  }
+
+  .imperfect-search-input {
+    min-height: 50px;
+    margin: 0.65rem 0 0.78rem;
+    border-radius: 999px !important;
+    font-size: 0.96rem;
   }
 
   .cashier-tabs {
