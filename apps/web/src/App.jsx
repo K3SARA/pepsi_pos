@@ -430,6 +430,11 @@ const inDateRange = (iso, from, to) => {
   if (to && day > to) return false;
   return true;
 };
+const matchesSearch = (term, ...values) => {
+  const query = String(term || "").trim().toLowerCase();
+  if (!query) return true;
+  return values.some((value) => String(value ?? "").toLowerCase().includes(query));
+};
 
 const openSaleReceiptPrint = ({
   sale,
@@ -799,6 +804,10 @@ const CashierView = ({
   }, [cashier, state.sales]);
   const [repProductivityDateFrom, setRepProductivityDateFrom] = useState(() => toColomboDateKey());
   const [repProductivityDateTo, setRepProductivityDateTo] = useState(() => toColomboDateKey());
+  const [repSalesSearch, setRepSalesSearch] = useState("");
+  const [repRecentSalesSearch, setRepRecentSalesSearch] = useState("");
+  const [repComparisonSearch, setRepComparisonSearch] = useState("");
+  const [repStockSearch, setRepStockSearch] = useState("");
 
   const damagedQtyByProduct = useMemo(() => {
     const map = new Map();
@@ -827,6 +836,11 @@ const CashierView = ({
       })
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [state.products, damagedQtyByProduct]);
+  const filteredRepStockBaseRows = useMemo(() => {
+    const term = String(repStockSearch || "").trim().toLowerCase();
+    if (!term) return repStockRows;
+    return repStockRows.filter((row) => matchesSearch(term, row.name, row.id));
+  }, [repStockRows, repStockSearch]);
 
   const repStockSummary = useMemo(() => {
     let remainingTotal = 0;
@@ -857,14 +871,14 @@ const CashierView = ({
         mrp: (row) => Number(row.mrp || 0),
         remaining: (row) => Number(row.remaining || 0)
       }[repStockSort.key] || ((row) => String(row.name || ""));
-      return [...repStockRows].sort((a, b) => {
+      return [...filteredRepStockBaseRows].sort((a, b) => {
         const av = getValue(a);
         const bv = getValue(b);
         if (typeof av === "number" && typeof bv === "number") return (av - bv) * factor;
         return String(av || "").localeCompare(String(bv || ""), undefined, { numeric: true, sensitivity: "base" }) * factor;
       });
     },
-    [repStockRows, repStockSort]
+    [filteredRepStockBaseRows, repStockSort]
   );
   const sortedRepDamagedRows = useMemo(
     () => {
@@ -875,7 +889,7 @@ const CashierView = ({
         mrp: (row) => Number(row.mrp || 0),
         damaged: (row) => Number(row.damaged || 0)
       }[repStockSort.key] || ((row) => String(row.name || ""));
-      return [...repStockRows]
+      return [...filteredRepStockBaseRows]
         .filter((row) => row.damaged > 0)
         .sort((a, b) => {
           const av = getValue(a);
@@ -884,7 +898,7 @@ const CashierView = ({
           return String(av || "").localeCompare(String(bv || ""), undefined, { numeric: true, sensitivity: "base" }) * factor;
         });
     },
-    [repStockRows, repStockSort]
+    [filteredRepStockBaseRows, repStockSort]
   );
 
   const customerNameOptions = useMemo(() => {
@@ -1848,8 +1862,14 @@ const CashierView = ({
           </section>
           <section className="panel rep-sales-panel">
             <h2>My Sales</h2>
+            <input
+              className="search-icon-input imperfect-search-input"
+              value={repSalesSearch}
+              onChange={(e) => setRepSalesSearch(e.target.value)}
+              placeholder="Search my sales"
+            />
             <div className="list rep-sales-list">
-              {repSales.map((sale) => (
+              {filteredRepSales.map((sale) => (
                 <article key={sale.id} className="list-row rep-sale-card">
                   <div className="rep-sale-main">
                     <div className="rep-sale-id-row">
@@ -1888,8 +1908,14 @@ const CashierView = ({
           </section>
           <section className="panel">
             <h2>Recent Sales</h2>
+            <input
+              className="search-icon-input imperfect-search-input"
+              value={repRecentSalesSearch}
+              onChange={(e) => setRepRecentSalesSearch(e.target.value)}
+              placeholder="Search recent sales"
+            />
             <div className="list">
-              {state.sales.slice(0, 20).map((sale) => (
+              {filteredRecentSales.map((sale) => (
                 <article key={sale.id} className="list-row">
                   <div>
                     <strong>#{sale.id} ({sale.cashier || "-"})</strong>
@@ -1903,8 +1929,14 @@ const CashierView = ({
           </section>
           <section className="panel">
             <h2>Rep Comparison</h2>
+            <input
+              className="search-icon-input imperfect-search-input"
+              value={repComparisonSearch}
+              onChange={(e) => setRepComparisonSearch(e.target.value)}
+              placeholder="Search rep"
+            />
             <div className="list">
-              {repCompareRows.map((row) => (
+              {filteredRepCompareRows.map((row) => (
                 <article key={row.rep} className="list-row">
                   <div>
                     <strong>{row.rep}</strong>
@@ -2084,6 +2116,12 @@ const CashierView = ({
 
           <section className="panel rep-stock-panel">
             <h2>Remaining Stock</h2>
+            <input
+              className="search-icon-input imperfect-search-input"
+              value={repStockSearch}
+              onChange={(e) => setRepStockSearch(e.target.value)}
+              placeholder="Search stock item"
+            />
             <div className="rep-stock-table">
               <header>
                 <button type="button" className="th-sort" onClick={() => toggleRepStockSort("name")}>Item{repStockSortMark("name")}</button>
@@ -2210,6 +2248,15 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [customerReportSearch, setCustomerReportSearch] = useState("");
   const [customerPanelSearch, setCustomerPanelSearch] = useState("");
   const [stockPanelSearch, setStockPanelSearch] = useState("");
+  const [staffSearch, setStaffSearch] = useState("");
+  const [deliveriesSearch, setDeliveriesSearch] = useState("");
+  const [deliveredItemsSearch, setDeliveredItemsSearch] = useState("");
+  const [itemWiseSearch, setItemWiseSearch] = useState("");
+  const [salesWiseSearch, setSalesWiseSearch] = useState("");
+  const [customerWiseSearch, setCustomerWiseSearch] = useState("");
+  const [repOutstandingSearch, setRepOutstandingSearch] = useState("");
+  const [reportDeliverySearch, setReportDeliverySearch] = useState("");
+  const [loadingsSearch, setLoadingsSearch] = useState("");
   const [deliveryLorry, setDeliveryLorry] = useState("all");
   const [deliveryDateFrom, setDeliveryDateFrom] = useState("");
   const [deliveryDateTo, setDeliveryDateTo] = useState("");
@@ -5164,6 +5211,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   </div>
                 </div>
               ) : null}
+              <input
+                className="search-icon-input imperfect-search-input"
+                value={staffSearch}
+                onChange={(e) => setStaffSearch(e.target.value)}
+                placeholder="Search staff"
+              />
               <div className="admin-table staff-table">
                 <header>
                   <button type="button" className="th-sort" onClick={() => toggleSort("staff", "name")}>Staff{sortMark("staff", "name")}</button>
@@ -5173,7 +5226,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <button type="button" className="th-sort" onClick={() => toggleSort("staff", "revenue")}>Revenue{sortMark("staff", "revenue")}</button>
                   <span>Action</span>
                 </header>
-                {sortedStaffRows.length ? sortedStaffRows.map((row) => (
+                {sortedStaffRows.filter((row) => matchesSearch(staffSearch, row.name, row.username, row.authRole, row.role)).length ? sortedStaffRows.filter((row) => matchesSearch(staffSearch, row.name, row.username, row.authRole, row.role)).map((row) => (
                   <article
                     key={`${row.authUserId || "auth-none"}-${row.staffId || "staff-none"}-${row.name}`}
                     className="staff-clickable-row"
@@ -5268,6 +5321,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <input type="date" value={deliveryDateTo} onChange={(e) => setDeliveryDateTo(e.target.value)} />
                 </label>
               </div>
+              <input
+                className="search-icon-input imperfect-search-input"
+                value={deliveriesSearch}
+                onChange={(e) => setDeliveriesSearch(e.target.value)}
+                placeholder="Search deliveries"
+              />
               <div className="admin-table deliveries-table">
                 <header>
                   <button type="button" className="th-sort delivery-col-id" onClick={() => toggleSort("deliveries", "id")}>Sale ID{sortMark("deliveries", "id")}</button>
@@ -5278,7 +5337,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <button type="button" className="th-sort delivery-col-status" onClick={() => toggleSort("deliveries", "status")}>Status{sortMark("deliveries", "status")}</button>
                   <span className="th-action delivery-col-action">Action</span>
                 </header>
-                {sortedDeliveryRows.length ? sortedDeliveryRows.map((row) => (
+                {sortedDeliveryRows.filter((row) => matchesSearch(deliveriesSearch, row.id, row.rep, row.lorry, row.when, row.sale?.customerName, row.confirmed ? "confirmed" : "pending")).length ? sortedDeliveryRows.filter((row) => matchesSearch(deliveriesSearch, row.id, row.rep, row.lorry, row.when, row.sale?.customerName, row.confirmed ? "confirmed" : "pending")).map((row) => (
                   <article key={`d-${row.id}`}>
                     <span className="delivery-col-id delivery-sale-cell">
                       <strong className="delivery-sale-id">#{row.id}</strong>
@@ -5333,6 +5392,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <strong>{currency(deliveredTotals.value)}</strong>
                 </article>
               </div>
+              <input
+                className="search-icon-input imperfect-search-input"
+                value={deliveredItemsSearch}
+                onChange={(e) => setDeliveredItemsSearch(e.target.value)}
+                placeholder="Search delivered items"
+              />
               <div className="admin-table deliveries-report-table">
                 <header>
                   <button type="button" className="th-sort" onClick={() => toggleSort("deliveredItems", "item")}>Item{sortMark("deliveredItems", "item")}</button>
@@ -5340,7 +5405,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <button type="button" className="th-sort" onClick={() => toggleSort("deliveredItems", "qty")}>Delivered Qty{sortMark("deliveredItems", "qty")}</button>
                   <button type="button" className="th-sort" onClick={() => toggleSort("deliveredItems", "value")}>Delivered Value{sortMark("deliveredItems", "value")}</button>
                 </header>
-                {sortedDeliveredItemRows.length ? sortedDeliveredItemRows.map((row) => (
+                {sortedDeliveredItemRows.filter((row) => matchesSearch(deliveredItemsSearch, row.item, row.sku)).length ? sortedDeliveredItemRows.filter((row) => matchesSearch(deliveredItemsSearch, row.item, row.sku)).map((row) => (
                   <article key={`dr-${row.key}`}>
                     <span>{row.item}</span>
                     <span>{row.sku}</span>
@@ -5606,6 +5671,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <input type="date" value={itemDateTo} onChange={(e) => setItemDateTo(e.target.value)} />
                   </label>
                 </div>
+                <input
+                  className="search-icon-input imperfect-search-input"
+                  value={itemWiseSearch}
+                  onChange={(e) => setItemWiseSearch(e.target.value)}
+                  placeholder="Search item wise report"
+                />
                 <div className="admin-table item-wise-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("itemWise", "name")}>Item{sortMark("itemWise", "name")}</button>
@@ -5614,7 +5685,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <button type="button" className="th-sort" onClick={() => toggleSort("itemWise", "bundles")}>Bundles{sortMark("itemWise", "bundles")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("itemWise", "singles")}>Singles{sortMark("itemWise", "singles")}</button>
                   </header>
-                  {sortedItemWiseRows.length ? sortedItemWiseRows.map((row) => (
+                  {sortedItemWiseRows.filter((row) => matchesSearch(itemWiseSearch, row.name, row.sku, row.size, row.category)).length ? sortedItemWiseRows.filter((row) => matchesSearch(itemWiseSearch, row.name, row.sku, row.size, row.category)).map((row) => (
                     <article key={row.key}>
                       <span>{row.name}</span>
                       <span>{row.sku}</span>
@@ -5644,6 +5715,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <span className="sales-range-kpi-label">Selected Range Total Sale Value</span>
                   <strong className="sales-range-kpi-value">{currency(salesRangeTotal)}</strong>
                 </div>
+                <input
+                  className="search-icon-input imperfect-search-input"
+                  value={salesWiseSearch}
+                  onChange={(e) => setSalesWiseSearch(e.target.value)}
+                  placeholder="Search sales wise report"
+                />
                 <div className="admin-table sales-wise-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "id")}>Sale ID{sortMark("salesWise", "id")}</button>
@@ -5652,7 +5729,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <button type="button" className="th-sort" onClick={() => toggleSort("salesWise", "total")}>Total<br />(LKR){sortMark("salesWise", "total")}</button>
                     <span className="th-action">Actions</span>
                   </header>
-                  {sortedSalesWiseRows.length ? sortedSalesWiseRows.slice(0, 50).map((row) => (
+                  {sortedSalesWiseRows.filter((row) => matchesSearch(salesWiseSearch, row.id, row.rep, row.lorry, row.when, row.raw?.customerName)).length ? sortedSalesWiseRows.filter((row) => matchesSearch(salesWiseSearch, row.id, row.rep, row.lorry, row.when, row.raw?.customerName)).slice(0, 50).map((row) => (
                     <article key={row.id}>
                       <span className="sales-id-cell">
                         <strong>#{row.id}</strong>
@@ -5727,6 +5804,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               {reportSubpage === "customer-wise" ? (
               <section className="admin-mobile-section report-panel report-customerwise-panel">
                 <h2>Customer Wise Report</h2>
+                <input
+                  className="search-icon-input imperfect-search-input"
+                  value={customerWiseSearch}
+                  onChange={(e) => setCustomerWiseSearch(e.target.value)}
+                  placeholder="Search customer wise report"
+                />
                 <div className="admin-table customer-wise-report-table">
                   <header>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "name")}>Customer{sortMark("customerWise", "name")}</button>
@@ -5734,7 +5817,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "spent")}>Total Spent (LKR){sortMark("customerWise", "spent")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("customerWise", "lastAt")}>Last Purchase{sortMark("customerWise", "lastAt")}</button>
                   </header>
-                {sortedCustomerWiseRows.length ? sortedCustomerWiseRows.map((row) => (
+                {sortedCustomerWiseRows.filter((row) => matchesSearch(customerWiseSearch, row.name, row.lastAt)).length ? sortedCustomerWiseRows.filter((row) => matchesSearch(customerWiseSearch, row.name, row.lastAt)).map((row) => (
                   <article key={row.name}>
                     <span>{row.name}</span>
                     <span>{row.orders}</span>
@@ -5789,6 +5872,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               {reportSubpage === "rep-outstanding" ? (
               <section className="admin-mobile-section report-panel report-rep-outstanding-panel">
                 <h2>Rep Wise Customer Outstanding</h2>
+                <input
+                  className="search-icon-input imperfect-search-input"
+                  value={repOutstandingSearch}
+                  onChange={(e) => setRepOutstandingSearch(e.target.value)}
+                  placeholder="Search rep outstanding"
+                />
                 <div className="rep-outstanding-summary-grid">
                   <article>
                     <span>Reps with Outstanding</span>
@@ -5814,7 +5903,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <button type="button" className="th-sort" onClick={() => toggleSort("repOutstanding", "bills")}>Bills{sortMark("repOutstanding", "bills")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("repOutstanding", "outstanding")}>Outstanding (LKR){sortMark("repOutstanding", "outstanding")}</button>
                   </header>
-                  {sortedRepOutstandingRows.length ? sortedRepOutstandingRows.map((row) => (
+                  {sortedRepOutstandingRows.filter((row) => matchesSearch(repOutstandingSearch, row.rep)).length ? sortedRepOutstandingRows.filter((row) => matchesSearch(repOutstandingSearch, row.rep)).map((row) => (
                     <article key={`rep-out-${row.rep}`}>
                       <span>{row.rep}</span>
                       <span
@@ -5861,6 +5950,12 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <input type="date" value={reportDeliveryDateTo} onChange={(e) => setReportDeliveryDateTo(e.target.value)} />
                   </label>
                 </div>
+                <input
+                  className="search-icon-input imperfect-search-input"
+                  value={reportDeliverySearch}
+                  onChange={(e) => setReportDeliverySearch(e.target.value)}
+                  placeholder="Search delivery report"
+                />
                 <div className="delivery-report-kpi-grid">
                   <article><span>Total Bills</span><strong>{reportDeliverySummary.totalBills}</strong></article>
                   <article><span>Confirmed</span><strong>{reportDeliverySummary.confirmedBills}</strong></article>
@@ -5883,7 +5978,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "deliveredQty")}>Delivered{sortMark("deliveryReport", "deliveredQty")}</button>
                     <button type="button" className="th-sort" onClick={() => toggleSort("deliveryReport", "deliveredValue")}>Value (LKR){sortMark("deliveryReport", "deliveredValue")}</button>
                   </header>
-                  {sortedReportDeliveryRows.length ? sortedReportDeliveryRows.map((row) => (
+                  {sortedReportDeliveryRows.filter((row) => matchesSearch(reportDeliverySearch, row.id, row.date, row.rep, row.lorry, row.status)).length ? sortedReportDeliveryRows.filter((row) => matchesSearch(reportDeliverySearch, row.id, row.date, row.rep, row.lorry, row.status)).map((row) => (
                     <article key={`rdr-${row.id}`}>
                       <span>#{row.id}</span>
                       <span>{row.date}</span>
@@ -5933,12 +6028,18 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <input type="time" value={loadingTimeTo} onChange={(e) => setLoadingTimeTo(e.target.value)} />
                   </label>
                 </div>
+                <input
+                  className="search-icon-input imperfect-search-input"
+                  value={loadingsSearch}
+                  onChange={(e) => setLoadingsSearch(e.target.value)}
+                  placeholder="Search loading rows"
+                />
                 <p className="form-hint">
                   Resets only the lorry capacity count used for new orders. Existing sales and loading reports stay unchanged.
                 </p>
               </section>
               {LOADING_PANEL_CONFIG.map((panel) => {
-                const rows = sortedLoadingByLorry[panel.name] || [];
+                const rows = (sortedLoadingByLorry[panel.name] || []).filter((row) => matchesSearch(loadingsSearch, row.name, row.sku, row.size, panel.name));
                 const summary = loadingSummaryByLorry[panel.name] || {};
                 return (
                   <section key={panel.name} className={`admin-mobile-section loading-lorry-panel ${panel.className}`}>
