@@ -1233,6 +1233,34 @@ const CashierView = ({
     }
     return [...map.values()].sort((a, b) => b.revenue - a.revenue);
   }, [state.sales]);
+  const filteredRepSales = useMemo(
+    () =>
+      repSales.filter((sale) =>
+        matchesSearch(repSalesSearch, sale.id, sale.customerName, sale.lorry, sale.paymentType, sale.createdAt)
+      ),
+    [repSales, repSalesSearch]
+  );
+  const filteredRecentSales = useMemo(
+    () =>
+      (state.sales || [])
+        .slice(0, 20)
+        .filter((sale) =>
+          matchesSearch(
+            repRecentSalesSearch,
+            sale.id,
+            sale.customerName,
+            sale.cashier,
+            sale.lorry,
+            sale.paymentType,
+            sale.createdAt
+          )
+        ),
+    [state.sales, repRecentSalesSearch]
+  );
+  const filteredRepCompareRows = useMemo(
+    () => repCompareRows.filter((row) => matchesSearch(repComparisonSearch, row.rep)),
+    [repCompareRows, repComparisonSearch]
+  );
   const [editingSaleId, setEditingSaleId] = useState("");
   const [saleEditLines, setSaleEditLines] = useState([]);
   const [saleEditPaymentType, setSaleEditPaymentType] = useState(PAYMENT_TYPES[0]);
