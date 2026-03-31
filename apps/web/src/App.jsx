@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { io } from "socket.io-client";
 import { calculateTotals, PAYMENT_TYPES, SOCKET_EVENTS } from "@pepsi/shared";
 import {
@@ -46,6 +46,12 @@ const colomboDateFormatter = new Intl.DateTimeFormat("en-CA", {
   year: "numeric",
   month: "2-digit",
   day: "2-digit"
+});
+const colomboTimeFormatter = new Intl.DateTimeFormat("en-GB", {
+  timeZone: BUSINESS_TIME_ZONE,
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false
 });
 const escapeHtml = (value = "") => String(value)
   .replace(/&/g, "&amp;")
@@ -117,6 +123,13 @@ const productDisplayName = (product) => {
 const toColomboDateKey = (value = new Date()) => {
   try {
     return colomboDateFormatter.format(new Date(value));
+  } catch {
+    return "";
+  }
+};
+const toColomboTimeKey = (value = new Date()) => {
+  try {
+    return colomboTimeFormatter.format(new Date(value));
   } catch {
     return "";
   }
@@ -598,22 +611,28 @@ ${bundleGuideText ? `<div class="bundle-guide-line"><span>Bundle Count</span>${e
 const LoginScreen = ({ onLogin, error }) => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const handleKeyDown = (e) => { if (e.key === "Enter") onLogin({ username, password }); };
 
   return (
     <div className="auth-shell">
       <div className="auth-card">
-        <div className="auth-login-title">
-            
-            </div>
         <div className="auth-brand">
           <img src="/pepsi-logo.svg" alt="Pepsi logo" />
-          
         </div>
-        
-        <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="Username" />
-        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
+        <div className="auth-login-title">
+          <h2 className="auth-welcome">Welcome Back</h2>
+          <p className="auth-subtitle">Sign in to your account</p>
+        </div>
+        <div className="auth-fields">
+          <label className="auth-field">
+            <input value={username} onChange={(e) => setUsername(e.target.value)} onKeyDown={handleKeyDown} placeholder="Username" autoComplete="username" />
+          </label>
+          <label className="auth-field">
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={handleKeyDown} placeholder="Password" autoComplete="current-password" />
+          </label>
+        </div>
         {error ? <p className="auth-error">{error}</p> : null}
-        <button className="auth-submit" type="button" onClick={() => onLogin({ username, password })}>Sign in</button>
+        <button className="auth-submit" type="button" onClick={() => onLogin({ username, password })}>Sign In</button>
         <div className="auth-bottom-logo">
           <a href="https://www.jnco.tech" target="_blank" rel="noreferrer">
             <img src="/powered.png" alt="Powered by" />
@@ -700,6 +719,8 @@ const CashierView = ({
     setMessage,
     onSaleDeleted,
     onSuccess,
+    onLogout,
+    onBillingFocusChange,
     requestConfirm,
     savingCheckout,
     checkout
@@ -716,6 +737,22 @@ const CashierView = ({
       || productDisplayName(item).toLowerCase().includes(term)
     );
   }, [search, state.products]);
+
+  const itemSizeGroups = useMemo(() => {
+    const groups = new Map();
+    for (const product of filteredProducts) {
+      const explicitSize = String(product?.size || "").trim();
+      const sizeMl = extractSizeMl(explicitSize || product?.name || "");
+      const label = explicitSize || (sizeMl > 0 ? `${sizeMl} ml` : "Other");
+      const numericSort = sizeMl > 0 ? sizeMl : Number.POSITIVE_INFINITY;
+      if (!groups.has(label)) groups.set(label, { label, sort: numericSort, products: [] });
+      groups.get(label).products.push(product);
+    }
+    return Array.from(groups.values()).sort((a, b) => {
+      if (a.sort !== b.sort) return a.sort - b.sort;
+      return String(a.label).localeCompare(String(b.label));
+    });
+  }, [filteredProducts]);
   const cartQtyByProduct = useMemo(() => {
     const map = new Map();
     for (const line of (cart || [])) {
@@ -980,18 +1017,32 @@ const CashierView = ({
   };
 
   const addToCart = (product) => {
-    const requested = Math.floor(Number(catalogQtyDrafts[product.id] || 1));
+    const requested = Math.floor(Number(catalogQtyDrafts[product.id]));
+    if (!Number.isFinite(requested) || requested <= 0) return;
     addToCartWithQty(product, requested);
+  };
+  const removeFromCartWithQty = (product, requestedQty) => {
+    const requested = Math.floor(Number(requestedQty || 1));
+    const removeQty = Number.isFinite(requested) && requested > 0 ? requested : 1;
+    const currentQty = Math.max(0, Number(cartQtyByProduct.get(product?.id) || 0));
+    if (currentQty <= 0) return;
+    triggerAddHaptic();
+    updateQty(product.id, Math.max(0, currentQty - removeQty));
   };
 
   const updateQty = (productId, quantity) => {
     if (quantity === "") return;
     const parsed = Number(quantity);
     if (!Number.isFinite(parsed)) return;
-    const nextQty = Math.floor(parsed);
+    let nextQty = Math.floor(parsed);
     if (nextQty <= 0) {
       setCart((current) => current.filter((line) => line.productId !== productId));
       return;
+    }
+    const product = state?.products?.find((p) => p.id === productId);
+    if (product) {
+      const stockLimit = Math.max(0, Number(product.stock || 0));
+      if (nextQty > stockLimit) nextQty = stockLimit;
     }
     setCart((current) => current.map((line) => (line.productId === productId ? { ...line, quantity: nextQty } : line)));
   };
@@ -1027,6 +1078,12 @@ const CashierView = ({
     }));
   };
   const [showAddCustomer, setShowAddCustomer] = useState(false);
+  const [showCustomerPicker, setShowCustomerPicker] = useState(false);
+  const [showCartPopup, setShowCartPopup] = useState(false);
+  const [showItemSizePicker, setShowItemSizePicker] = useState(false);
+  const [activeItemSize, setActiveItemSize] = useState("");
+  const [sizeProductSearch, setSizeProductSearch] = useState("");
+  const [expandedSizeProductId, setExpandedSizeProductId] = useState("");
   const [customerDraft, setCustomerDraft] = useState({ name: "", phone: "", address: "" });
   const [customerDraftError, setCustomerDraftError] = useState("");
   const [savingCustomer, setSavingCustomer] = useState(false);
@@ -1041,16 +1098,53 @@ const CashierView = ({
   const [savingReturn, setSavingReturn] = useState(false);
   const lastHapticAtRef = useRef(0);
   const [mobileCashierNavOpen, setMobileCashierNavOpen] = useState(false);
+  const [repBillingStep, setRepBillingStep] = useState("customer");
+  const [showPostSaleHomeButton, setShowPostSaleHomeButton] = useState(false);
 
   useEffect(() => {
     setMobileCashierNavOpen(false);
     scrollViewportToTop();
   }, [cashierPage]);
 
+  useEffect(() => {
+    if (cashierPage === "billing") scrollViewportToTop();
+  }, [cashierPage, repBillingStep]);
+
+  useEffect(() => {
+    if (repBillingStep !== "items") {
+      setShowItemSizePicker(false);
+      setSizeProductSearch("");
+      setExpandedSizeProductId("");
+    }
+  }, [repBillingStep]);
+  useEffect(() => {
+    if (!showItemSizePicker) setExpandedSizeProductId("");
+  }, [showItemSizePicker]);
+  useEffect(() => {
+    if ((cart || []).length > 0) setShowPostSaleHomeButton(false);
+  }, [cart]);
+
+  useEffect(() => {
+    onBillingFocusChange?.(cashierPage === "billing");
+    return () => onBillingFocusChange?.(false);
+  }, [cashierPage, onBillingFocusChange]);
+
   const returnSale = useMemo(
     () => state.sales.find((sale) => String(sale.id) === String(returnSaleId).trim()) || null,
     [state.sales, returnSaleId]
   );
+  const activeSizeProducts = useMemo(() => {
+    if (!activeItemSize) return [];
+    const group = itemSizeGroups.find((row) => row.label === activeItemSize);
+    if (!group) return [];
+    const term = String(sizeProductSearch || "").trim().toLowerCase();
+    if (!term) return group.products;
+    return group.products.filter((item) =>
+      productDisplayName(item).toLowerCase().includes(term)
+      || String(item.sku || "").toLowerCase().includes(term)
+      || String(item.category || "").toLowerCase().includes(term)
+    );
+  }, [activeItemSize, itemSizeGroups, sizeProductSearch]);
 
   const returnCustomerOptions = useMemo(() => {
     const rep = String(cashier || "").trim().toLowerCase();
@@ -1368,6 +1462,14 @@ const CashierView = ({
       setSavingCustomerPhone(false);
     }
   };
+  const repBillingSteps = [
+    { key: "customer", label: "Customer", icon: "👤" },
+    { key: "items", label: "Items", icon: "📦" },
+    { key: "cart", label: "Cart", icon: "🛒" },
+    { key: "checkout", label: "Complete", icon: "✅" }
+  ];
+  const repBillingStepIndex = Math.max(0, repBillingSteps.findIndex((step) => step.key === repBillingStep));
+  const selectedBundleViolation = findBundleDiscountViolation({ lines: cart, bundleDiscountLimit: selectedCustomerBundleDiscountLimit });
 
   const deleteRepSale = async (sale) => {
     try {
@@ -1402,25 +1504,28 @@ const CashierView = ({
       setNotice(error.message);
     }
   };
+  const billingFocusMode = cashierPage === "billing";
 
   return (
-    <>
+    <div className={cashierPage === "billing" ? "rep-redesign-scope" : ""}>
       {message && !/(error|invalid|required|cannot|unable|failed|not found|select|enter|type|exceeds)/i.test(String(message)) ? <p className="notice">{message}</p> : null}
-      <button
-        type="button"
-        className={`cashier-mobile-nav-toggle menu-toggle-btn ${mobileCashierNavOpen ? "open" : ""}`}
-        onClick={() => setMobileCashierNavOpen((current) => !current)}
-        aria-expanded={mobileCashierNavOpen}
-        aria-controls="cashier-sidebar-nav"
-        aria-label={mobileCashierNavOpen ? "Close menu" : "Open menu"}
-      >
-        <span className="menu-toggle-icon" aria-hidden="true">
-          <span />
-          <span />
-          <span />
-        </span>
-        <span className="menu-toggle-label">{mobileCashierNavOpen ? "Close" : "Menu"}</span>
-      </button>
+      {!billingFocusMode ? (
+        <button
+          type="button"
+          className={`cashier-mobile-nav-toggle menu-toggle-btn ${mobileCashierNavOpen ? "open" : ""}`}
+          onClick={() => setMobileCashierNavOpen((current) => !current)}
+          aria-expanded={mobileCashierNavOpen}
+          aria-controls="cashier-sidebar-nav"
+          aria-label={mobileCashierNavOpen ? "Close menu" : "Open menu"}
+        >
+          <span className="menu-toggle-icon" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </span>
+          <span className="menu-toggle-label">{mobileCashierNavOpen ? "Close" : "Menu"}</span>
+        </button>
+      ) : null}
       {mobileCashierNavOpen ? (
         <button
           type="button"
@@ -1429,275 +1534,452 @@ const CashierView = ({
           aria-label="Close menu"
         />
       ) : null}
-      <aside id="cashier-sidebar-nav" className={`cashier-mobile-sidebar ${mobileCashierNavOpen ? "open" : ""}`}>
-        <button type="button" className={cashierPage === "billing" ? "active" : ""} onClick={() => setCashierPage("billing")}>Billing</button>
-        <button type="button" className={cashierPage === "returns" ? "active" : ""} onClick={() => setCashierPage("returns")}>Returns</button>
-        <button type="button" className={cashierPage === "sales" ? "active" : ""} onClick={() => setCashierPage("sales")}>Sales</button>
-        <button type="button" className={cashierPage === "stock" ? "active" : ""} onClick={() => setCashierPage("stock")}>Stock</button>
-        <button type="button" className={cashierPage === "customers" ? "active" : ""} onClick={() => setCashierPage("customers")}>Customers</button>
+      <aside id="cashier-sidebar-nav" className={`cashier-mobile-sidebar ${mobileCashierNavOpen ? "open" : ""} ${billingFocusMode ? "billing-focus-mode" : ""}`}>
+        <button type="button" className={`cashier-nav-billing ${cashierPage === "billing" ? "active" : ""}`} onClick={() => setCashierPage("billing")}><span className="nav-emoji" aria-hidden="true">📝</span>Billing</button>
+        <button type="button" className={`cashier-nav-returns ${cashierPage === "returns" ? "active" : ""}`} onClick={() => setCashierPage("returns")}><span className="nav-emoji" aria-hidden="true">↩️</span>Returns</button>
+        <button type="button" className={`cashier-nav-sales ${cashierPage === "sales" ? "active" : ""}`} onClick={() => setCashierPage("sales")}><span className="nav-emoji" aria-hidden="true">📊</span>Sales</button>
+        <button type="button" className={`cashier-nav-stock ${cashierPage === "stock" ? "active" : ""}`} onClick={() => setCashierPage("stock")}><span className="nav-emoji" aria-hidden="true">📦</span>Stock</button>
+        <button type="button" className={`cashier-nav-customers ${cashierPage === "customers" ? "active" : ""}`} onClick={() => setCashierPage("customers")}><span className="nav-emoji" aria-hidden="true">👥</span>Customers</button>
+        <button type="button" className="cashier-sidebar-logout" onClick={onLogout}><span className="nav-emoji" aria-hidden="true">🚪</span>Log Out</button>
         <div className="side-menu-footer">
           <a href="https://www.jnco.tech" target="_blank" rel="noreferrer">
             <img src="/powered.png" alt="Powered by" />
           </a>
         </div>
       </aside>
-      <div className="cashier-tabs">
-        <button type="button" className={cashierPage === "billing" ? "active" : ""} onClick={() => setCashierPage("billing")}>Billing</button>
-        <button type="button" className={cashierPage === "returns" ? "active" : ""} onClick={() => setCashierPage("returns")}>Returns</button>
-        <button type="button" className={cashierPage === "sales" ? "active" : ""} onClick={() => setCashierPage("sales")}>Sales</button>
-        <button type="button" className={cashierPage === "stock" ? "active" : ""} onClick={() => setCashierPage("stock")}>Stock</button>
-        <button type="button" className={cashierPage === "customers" ? "active" : ""} onClick={() => setCashierPage("customers")}>Customers</button>
+      <div className={`cashier-tabs ${billingFocusMode ? "billing-focus-mode" : ""}`}>
+        <button type="button" className={`cashier-nav-billing ${cashierPage === "billing" ? "active" : ""}`} onClick={() => setCashierPage("billing")}><span className="nav-emoji" aria-hidden="true">📝</span>Billing</button>
+        <button type="button" className={`cashier-nav-returns ${cashierPage === "returns" ? "active" : ""}`} onClick={() => setCashierPage("returns")}><span className="nav-emoji" aria-hidden="true">↩️</span>Returns</button>
+        <button type="button" className={`cashier-nav-sales ${cashierPage === "sales" ? "active" : ""}`} onClick={() => setCashierPage("sales")}><span className="nav-emoji" aria-hidden="true">📊</span>Sales</button>
+        <button type="button" className={`cashier-nav-stock ${cashierPage === "stock" ? "active" : ""}`} onClick={() => setCashierPage("stock")}><span className="nav-emoji" aria-hidden="true">📦</span>Stock</button>
+        <button type="button" className={`cashier-nav-customers ${cashierPage === "customers" ? "active" : ""}`} onClick={() => setCashierPage("customers")}><span className="nav-emoji" aria-hidden="true">👥</span>Customers</button>
       </div>
 
       {cashierPage === "billing" ? (
-        <main className="grid billing-grid rep-billing-layout rep-ui-1">
-          <section className="panel rep-panel rep-catalog-panel">
-            <h2 className="panel-title"><span className="panel-icon" aria-hidden="true">📦</span>Catalog</h2>
-            <input className="search-icon-input" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search product / sku / category" />
-            <div className="list rep-catalog-list">
-              {filteredProducts.map((product) => (
-                <article key={product.id} className="list-row catalog-product-row">
-                  <div>
-                    <strong>{productDisplayName(product)}</strong>
-                    <p>{product.sku} • {product.category}</p>
-                    <p>
-                      {currency(productSalePrice(product))}
-                      {" • "}
-                      <span className={getCatalogStock(product) <= lowStockThreshold ? "stock-low-text" : ""}>
-                        Stock {getCatalogStock(product)}
-                      </span>
-                    </p>
-                    {getBundleSize(product) > 0 ? (
-                      <p className="catalog-bundle-rule">
-                        {getBundleSize(product)} units = 1 bundle
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="catalog-add-wrap">
-                    <input
-                      type="number"
-                      min="1"
-                      value={catalogQtyDrafts[product.id] ?? ""}
-                      onChange={(e) => setCatalogQtyDrafts((current) => ({ ...current, [product.id]: e.target.value }))}
-                      placeholder="Qty"
-                      className="catalog-qty-input"
-                    />
-                    <div className="catalog-quick-actions">
-                      {getBundleSize(product) > 0 ? (
-                        <button
-                          className="catalog-bundle-btn"
-                          type="button"
-                          onTouchStart={triggerAddHaptic}
-                          onPointerDown={triggerAddHaptic}
-                          onClick={() => addToCartWithQty(product, getBundleSize(product))}
-                          disabled={getCatalogStock(product) < getBundleSize(product)}
-                        >
-                          +1 Bundle
-                        </button>
-                      ) : null}
-                      <button
-                        className="catalog-single-btn"
-                        type="button"
-                        onTouchStart={triggerAddHaptic}
-                        onPointerDown={triggerAddHaptic}
-                        onClick={() => addToCartWithQty(product, 1)}
-                        disabled={getCatalogStock(product) <= 0}
-                      >
-                        +1 Single
-                      </button>
-                    </div>
-                    <button className="add-feedback-btn" type="button" onTouchStart={triggerAddHaptic} onPointerDown={triggerAddHaptic} onClick={() => addToCart(product)} disabled={getCatalogStock(product) <= 0}>Add Qty</button>
-                  </div>
-                </article>
+        <main className="grid rep-billing-wizard rep-ui-2">
+          <section className="panel rep-wizard-shell">
+            <div className="rep-wizard-top-actions-row">
+              <button
+                type="button"
+                className={`cashier-mobile-nav-toggle menu-toggle-btn billing-focus-mode in-card ${mobileCashierNavOpen ? "open" : ""}`}
+                onClick={() => setMobileCashierNavOpen((current) => !current)}
+                aria-expanded={mobileCashierNavOpen}
+                aria-controls="cashier-sidebar-nav"
+                aria-label={mobileCashierNavOpen ? "Close menu" : "Open menu"}
+              >
+                <span className="menu-toggle-icon" aria-hidden="true">
+                  <span />
+                  <span />
+                  <span />
+                </span>
+                <span className="menu-toggle-label">{mobileCashierNavOpen ? "Close" : "Menu"}</span>
+              </button>
+            </div>
+            <div className="rep-wizard-head">
+              <div>
+                <p className="rep-wizard-eyebrow">Rep Billing</p>
+                <h2>{repBillingSteps[repBillingStepIndex]?.label || "Billing"}</h2>
+                <p className="form-hint">One focused step at a time for easier mobile billing.</p>
+              </div>
+              <div className="rep-wizard-meta">
+                <span>{cart.length} item(s)</span>
+                <strong>{currency(totalAfterCustomerCredit)}</strong>
+              </div>
+            </div>
+
+            <div className="rep-wizard-progress">
+              {repBillingSteps.map((step, index) => (
+                <button
+                  key={step.key}
+                  type="button"
+                  className={`rep-wizard-step ${repBillingStep === step.key ? "active" : ""} ${index < repBillingStepIndex ? "done" : ""}`}
+                  onClick={() => {
+                    if (step.key === "items" && !customerName.trim()) return;
+                    if (step.key === "cart" && !cart.length) return;
+                    if (step.key === "checkout" && !cart.length) return;
+                    setRepBillingStep(step.key);
+                  }}
+                >
+                  <span>{step.icon || (index + 1)}</span>
+                  <strong>{step.label}</strong>
+                </button>
               ))}
             </div>
-          </section>
-          <section className="panel rep-panel rep-cart-panel">
-            <h2 className="panel-title"><span className="panel-icon" aria-hidden="true">🛒</span>Cart</h2>
-           
-            <div className="list cart-list rep-cart-list">
-               <section className="panel rep-cart-inner-panel">
-              {cart.length ? cart.map((line) => (
-                <article className="list-row" key={line.productId}>
-                  <div className="cart-line-head">
-                    <strong>{line.name}</strong>
-                    <p>{currency(lineBasePrice(line))} each • Item Disc {currency(lineItemDiscount(line))} • Net {currency(lineFinalPrice(line))}</p>
-                  </div>
-                  <div className="cart-line-controls">
-                    <div className="rep-cart-qty-cluster">
-                      <div className="qty-box">
-                        <button type="button" onClick={() => updateQty(line.productId, line.quantity - 1)}>-</button>
-                        <span>{line.quantity}</span>
-                        <button type="button" onClick={() => updateQty(line.productId, line.quantity + 1)}>+</button>
-                      </div>
-                      {getBundleSize(line) > 0 ? (
-                        <div className="rep-cart-bundle-actions">
-                          <button type="button" className="rep-cart-bundle-step rep-cart-bundle-step-down" onClick={() => updateQtyByBundle(line, "down")}>
-                            -1 Bundle
-                          </button>
-                          <button type="button" className="rep-cart-bundle-step rep-cart-bundle-step-up" onClick={() => updateQtyByBundle(line, "up")}>
-                            +1 Bundle
-                          </button>
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="item-discount-wrap">
-                      <div className="item-discount-inline">
-                        <select value={line.itemDiscountMode || "amount"} onChange={(e) => updateItemDiscountMode(line.productId, e.target.value)}>
-                          <option value="amount">Rs.</option>
-                          <option value="percent">%</option>
-                        </select>
-                        <input type="number" min="0" step="0.01" value={line.itemDiscount ?? 0} onChange={(e) => updateItemDiscount(line.productId, e.target.value)} placeholder="Item Disc" />
-                      </div>
-                      <p className="form-hint">Item Discount ({line.itemDiscountMode === "percent" ? "%" : "Rs."})</p>
-                    </div>
-                  </div>
-              </article>
-            )) : <p className="form-hint">Empty</p>}
-            
-            </section>
-            </div>
-            <div className="totals rep-totals-card">
-              <p>Subtotal: {currency(totals.subTotal)}</p>
-              <p>Discount: {currency(totals.discountAmount)}</p>
-              {appliedCustomerCredit > 0 ? <p>Customer Credit: - {currency(appliedCustomerCredit)}</p> : null}
-              <h3>Total: {currency(totalAfterCustomerCredit)}</h3>
-            </div>
-          </section>
 
-          <section className="panel rep-panel rep-checkout-panel">
-            <h2 className="panel-title"><span className="panel-icon" aria-hidden="true">💳</span>Checkout</h2>
-            <div className="form-grid rep-checkout-form">
-              <p className="form-hint">Cashier: {cashier || "-"}</p>
-              <input
-                value={customerName}
-                onChange={(e) => {
-                  setCustomerName(e.target.value);
-                  setShowCustomerSuggestions(true);
-                }}
-                onFocus={() => setShowCustomerSuggestions(true)}
-                onBlur={() => setTimeout(() => setShowCustomerSuggestions(false), 120)}
-                placeholder="Customer"
-              />
-              {showCustomerSuggestions && filteredCustomerOptions.length ? (
-                <div className="customer-suggestions">
-                  {filteredCustomerOptions.map((name) => (
-                    <button key={name} type="button" onClick={() => { setCustomerName(name); setShowCustomerSuggestions(false); }}>
-                      {name}
-                      {customerOutstandingMap.get(name) ? <span className="outstanding-text"> • OS {currency(customerOutstandingMap.get(name))}</span> : ""}
+            <div className="rep-wizard-body">
+              {repBillingStep === "customer" ? (
+                <section className="rep-step-screen rep-step-customer">
+                  <div className="rep-step-card rep-step-card-primary">
+                    <h3>Select Customer</h3>
+                    <p className="form-hint">Open a full-screen picker to search and select the customer.</p>
+                    <button type="button" className="rep-picker-launch" onClick={() => setShowCustomerPicker(true)}>
+                      <span>{customerName.trim() || "Select Customer"}</span>
+                      <strong>Open</strong>
                     </button>
-                  ))}
+                    <div className="rep-step-actions-inline">
+                      <button type="button" className="ghost" onClick={quickAddCustomer}>Add New Customer</button>
+                    </div>
+                    {customerName.trim() ? (
+                      <div className="rep-customer-focus-card rep-customer-focus-inline">
+                        <strong>{customerName}</strong>
+                        <p>Outstanding: {currency(selectedCustomerOutstanding)}</p>
+                        {selectedCustomerDiscountLimit > 0 ? <p>Discount Limit: {currency(selectedCustomerDiscountLimit)}</p> : null}
+                        {selectedCustomerBundleDiscountLimit > 0 ? <p>Bundle Limit: {currency(selectedCustomerBundleDiscountLimit)} per bundle</p> : null}
+                        {selectedSavedCustomer?.phone ? <p>Phone: {selectedSavedCustomer.phone}</p> : null}
+                      </div>
+                    ) : (
+                      <p className="form-hint">No customer selected yet.</p>
+                    )}
+                  </div>
+                </section>
+              ) : null}
+
+              {repBillingStep === "items" ? (
+                <section className="rep-step-screen rep-step-items">
+                  <div className="rep-step-card rep-step-card-primary">
+                    <div className="rep-size-layout-head">
+                      <h3>SELECT ITEMS</h3>
+                      <div className="rep-step-chip">{currentCartQty} units in cart</div>
+                    </div>
+                    <input
+                      className="search-icon-input rep-step-input rep-size-search"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Search size / product / sku"
+                    />
+                    <div className="rep-size-grid">
+                      {itemSizeGroups.length ? itemSizeGroups.map((group) => (
+                        <button
+                          key={group.label}
+                          type="button"
+                          className="rep-size-tile"
+                          onClick={() => {
+                            setActiveItemSize(group.label);
+                            setSizeProductSearch("");
+                            setShowItemSizePicker(true);
+                          }}
+                        >
+                          <strong>{group.label}</strong>
+                          <span>Available size</span>
+                        </button>
+                      )) : (
+                        <p className="form-hint">No matching sizes found.</p>
+                      )}
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+
+              {repBillingStep === "cart" ? (
+                <div className="modern-cart-wrapper">
+                  <header className="mc-header">
+                    <button className="mc-btn-back" onClick={() => setRepBillingStep("items")} aria-label="Back">
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><line x1="19" y1="12" x2="5" y2="12"></line><polyline points="12 19 5 12 12 5"></polyline></svg>
+                    </button>
+                    <h2>SHOPPING CART</h2>
+                    {showPostSaleHomeButton && !cart.length ? (
+                      <button
+                        className="mc-btn-home"
+                        type="button"
+                        onClick={() => {
+                          setRepBillingStep("customer");
+                          setShowPostSaleHomeButton(false);
+                        }}
+                        aria-label="Go to customer step"
+                      >
+                        Home
+                      </button>
+                    ) : (
+                      <button className="mc-btn-dots" onClick={() => setShowCartPopup(true)} aria-label="Edit Quantities">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"></circle><circle cx="12" cy="12" r="2"></circle><circle cx="19" cy="12" r="2"></circle></svg>
+                      </button>
+                    )}
+                  </header>
+
+                  <div className="mc-items-list">
+                    {cart.map((line) => (
+                      <article className="mc-item-card" key={`mc-${line.productId}`}>
+                        <div className="mc-item-img">
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v20"></path><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
+                        </div>
+                        <div className="mc-item-content">
+                          <div className="mc-item-row1">
+                            <strong className="mc-item-name">{line.name}</strong>
+                            <span className="mc-qty-text">×{line.quantity}</span>
+                          </div>
+                          <div className="mc-item-row2">
+                            <span className="mc-price-pill">{currency(lineFinalPrice(line))}</span>
+                            <span className="mc-base-price">{currency(lineBasePrice(line))} each</span>
+                          </div>
+                        </div>
+                        <div className="mc-item-disc-row" onClick={(e) => e.stopPropagation()}>
+                          <select
+                            className="mc-disc-mode"
+                            value={line.itemDiscountMode || "amount"}
+                            onChange={(e) => updateItemDiscountMode(line.productId, e.target.value)}
+                          >
+                            <option value="amount">Rs.</option>
+                            <option value="percent">%</option>
+                          </select>
+                          <input
+                            className="mc-disc-input"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={line.itemDiscount ?? 0}
+                            onChange={(e) => updateItemDiscount(line.productId, e.target.value)}
+                            placeholder="Item discount"
+                          />
+                          {lineItemDiscount(line) > 0 && (
+                            <span className="mc-disc-badge">-{currency(lineItemDiscount(line))}</span>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                    {cart.length === 0 ? <p className="form-hint" style={{textAlign: 'center', marginTop: '2rem'}}>Cart is empty.</p> : null}
+                  </div>
+
+                  {cart.length > 0 && (
+                    <div className="mc-order-summary">
+                      <div className="mc-summary-head">
+                        <h3>ORDER SUMMARY</h3>
+                        <span className="mc-summary-date">{new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
+                      </div>
+
+                      <div className="mc-summary-data">
+                        <div className="mc-data-row"><span>Sub Total</span><strong>{currency(totals.subTotal)}</strong></div>
+                        <div className="mc-data-row"><span>Item Discounts</span><strong>-{currency(cartDiscountTotal)}</strong></div>
+
+                        <div className="mc-disc-bill-row">
+                          <label className="mc-disc-label">Bill Discount</label>
+                          <div className="mc-disc-bill-inputs">
+                            <select value={discountMode} onChange={(e) => setDiscountMode(e.target.value)}>
+                              <option value="amount">Rs.</option>
+                              <option value="percent">%</option>
+                            </select>
+                            <input type="number" min="0" step="0.01" value={discountValue} onChange={(e) => setDiscountValue(e.target.value)} placeholder="0" />
+                          </div>
+                          {totals.discountAmount > 0 && <span className="mc-data-row"><span>Applied</span><strong>-{currency(totals.discountAmount)}</strong></span>}
+                        </div>
+
+                        <div className="mc-summary-divider"></div>
+                        <div className="mc-data-row mc-data-total"><span>Total</span><strong>{currency(totals.total)}</strong></div>
+                      </div>
+
+                      {/* ── REVIEW SECTION ── */}
+                      <div className="mc-review-section">
+                        <h4 className="mc-review-title">Review &amp; Confirm</h4>
+                        <div className="mc-review-grid">
+                          <article><span>Customer</span><strong>{customerName || "—"}</strong></article>
+                          <article><span>Items</span><strong>{cart.length} ({currentCartQty} units)</strong></article>
+                        </div>
+                        {customerName.trim() && selectedCustomerOutstanding > 0 ? (
+                          <p className="mc-review-warn">Outstanding: {currency(selectedCustomerOutstanding)}</p>
+                        ) : null}
+                        {selectedBundleViolation ? (
+                          <p className="mc-review-warn">{selectedBundleViolation.lineName} exceeds bundle discount limit.</p>
+                        ) : null}
+                        {customerName.trim() && selectedCustomerAvailableCredit > 0 ? (
+                          <div className="mc-review-credit">
+                            <label>Apply Credit (avail. {currency(selectedCustomerAvailableCredit)})</label>
+                            <div className="mc-disc-bill-inputs">
+                              <input type="number" min="0" step="0.01" value={customerCreditDraft} onChange={(e) => setCustomerCreditDraft(e.target.value)} placeholder="Credit amount" />
+                              <button type="button" className="ghost" onClick={() => setCustomerCreditDraft(String(selectedCustomerAvailableCredit))}>Max</button>
+                            </div>
+                            {appliedCustomerCredit > 0 ? <p className="mc-review-hint">Payable: {currency(totalAfterCustomerCredit)}</p> : null}
+                          </div>
+                        ) : null}
+                        <label className="mc-review-label">Delivery Route</label>
+                        <select className="mc-review-select" value={lorry} onChange={(e) => setLorry(e.target.value)}>
+                          <option value="">Select delivery lorry</option>
+                          {lorryLoadRows.map((row) => {
+                            const remaining = Math.max(0, LORRY_CAPACITY - row.load);
+                            const full = !row.isOverflow && remaining <= 0;
+                            return (
+                              <option key={row.name} value={row.name} disabled={full}>
+                                {row.isOverflow ? `${row.name} - Overflow` : (full ? `${row.name} - Full` : `${row.name} - ${remaining} left`)}
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <label className="mc-review-label">Payment Type</label>
+                        <select className="mc-review-select" value={paymentType} onChange={(e) => setPaymentType(e.target.value)}>
+                          {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {cart.length > 0 && (
+                    <div className="mc-footer-bar">
+                      <div className="mc-footer-total">
+                        <span>Total Checkout</span>
+                        <strong>{currency(appliedCustomerCredit > 0 ? totalAfterCustomerCredit : totals.total)}</strong>
+                      </div>
+                      <button className="mc-checkout-button" onClick={checkout} disabled={savingCheckout}>
+                        {savingCheckout ? "Processing..." : "Checkout"}
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : null}
-              {customerName.trim() ? <p className="form-hint outstanding-text">Outstanding: {currency(selectedCustomerOutstanding)}</p> : null}
-              {customerName.trim() && selectedCustomerDiscountLimit > 0 ? <p className="form-hint">Discount Limit: {currency(selectedCustomerDiscountLimit)}</p> : null}
-              {customerName.trim() && selectedCustomerBundleDiscountLimit > 0 ? <p className="form-hint">Bundle Discount Limit: {currency(selectedCustomerBundleDiscountLimit)} per bundle</p> : null}
-              {customerName.trim() && selectedCustomerDiscountLimit > 0 && cartDiscountTotal > selectedCustomerDiscountLimit ? (
-                <p className="form-hint outstanding-text">Current discount {currency(cartDiscountTotal)} exceeds allowed limit.</p>
-              ) : null}
-              {(() => {
-                const violation = findBundleDiscountViolation({ lines: cart, bundleDiscountLimit: selectedCustomerBundleDiscountLimit });
-                return violation ? (
-                  <p className="form-hint outstanding-text">
-                    {violation.lineName} exceeds bundle discount limit. Allowed {currency(violation.allowedBundleDiscount)} for {violation.fullBundles} bundle(s).
-                  </p>
-                ) : null;
-              })()}
-              {customerName.trim() && selectedCustomerAvailableCredit > 0 ? (
-                <>
-                  <p className="form-hint">Available Credit: {currency(selectedCustomerAvailableCredit)}</p>
-                  <label className="form-hint">Apply Customer Credit</label>
-                  <div className="checkout-inline-action">
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={customerCreditDraft}
-                      onChange={(e) => setCustomerCreditDraft(e.target.value)}
-                      placeholder="Customer credit amount"
-                    />
-                    <button type="button" className="ghost" onClick={() => setCustomerCreditDraft(String(selectedCustomerAvailableCredit))}>
-                      Use Full
-                    </button>
-                  </div>
-                  {appliedCustomerCredit > 0 ? <p className="form-hint">Credit applied: {currency(appliedCustomerCredit)} • Payable now: {currency(totalAfterCustomerCredit)}</p> : null}
-                </>
-              ) : null}
-              {selectedSavedCustomer ? (
-                <>
-                  <label className="form-hint">Customer Tel</label>
-                  <div className="checkout-inline-action">
-                    <input
-                      value={customerPhoneDraft}
-                      onChange={(e) => setCustomerPhoneDraft(e.target.value)}
-                      placeholder="Customer phone"
-                    />
-                    <button type="button" className="ghost" onClick={saveBillingCustomerPhone} disabled={savingCustomerPhone}>
-                      {savingCustomerPhone ? "Saving..." : "Save"}
-                    </button>
-                  </div>
-                </>
-              ) : null}
-              <label className="form-hint">Total Bill Discount</label>
-              <div className="bill-discount-inline">
-                <select value={discountMode} onChange={(e) => setDiscountMode(e.target.value)}>
-                  <option value="amount">Rs.</option>
-                  <option value="percent">%</option>
-                </select>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  value={discountValue}
-                  onChange={(e) => setDiscountValue(e.target.value)}
-                  placeholder={discountMode === "percent" ? "Discount %" : "Discount Rs."}
-                />
-              </div>
-              
-              <select value={lorry} onChange={(e) => setLorry(e.target.value)}>
-                <option value="">Select delivery lorry</option>
-                {lorryLoadRows.map((row) => {
-                  const remaining = Math.max(0, LORRY_CAPACITY - row.load);
-                  const full = !row.isOverflow && remaining <= 0;
-                  return (
-                    <option key={row.name} value={row.name} disabled={full}>
-                      {row.isOverflow
-                        ? `${row.name} - Overflow bucket`
-                        : (full ? `${row.name} - Lorry is full` : `${row.name} - ${remaining} left`)}
-                    </option>
-                  );
-                })}
-              </select>
-              <div className="form-hint lorry-capacity-note">
-                {lorryLoadRows.map((row) => {
-                  const remaining = Math.max(0, LORRY_CAPACITY - row.load);
-                  return (
-                    <span key={row.name} className={!row.isOverflow && remaining <= 0 ? "outstanding-text" : ""}>
-                      {row.isOverflow
-                        ? `${row.name}: ${row.load} queued`
-                        : `${row.name}: ${row.load}/${LORRY_CAPACITY} ${remaining <= 0 ? "• Lorry is full" : `• ${remaining} left`}`}
-                    </span>
-                  );
-                })}
-              </div>
-              <select value={paymentType} onChange={(e) => setPaymentType(e.target.value)}>
-                {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
-              </select>
-              <p className="form-hint">Payment will be collected and confirmed at delivery.</p>
-              
-            </div>
-           
-            
-            
-            
-           
-            <button className="checkout" type="button" onClick={checkout} disabled={!cart.length || savingCheckout}>{savingCheckout ? "Saving..." : "Complete Sale"}</button>
-            
-          </section>
 
+
+              {repBillingStep === "checkout" ? (
+                <section className="rep-step-screen rep-step-checkout">
+                  <div className="rep-step-card rep-step-card-primary">
+                    <h3>Review & Complete</h3>
+                    <div className="rep-checkout-review-grid">
+                      <article>
+                        <span>Customer</span>
+                        <strong>{customerName || "-"}</strong>
+                      </article>
+                      <article>
+                        <span>Items</span>
+                        <strong>{cart.length}</strong>
+                      </article>
+                      <article>
+                        <span>Units</span>
+                        <strong>{currentCartQty}</strong>
+                      </article>
+                      <article>
+                        <span>Payable</span>
+                        <strong>{currency(totalAfterCustomerCredit)}</strong>
+                      </article>
+                    </div>
+                    <div className="form-grid rep-checkout-form rep-checkout-form-steps">
+                      <p className="form-hint">Cashier: {cashier || "-"}</p>
+                      {customerName.trim() ? <p className="form-hint outstanding-text">Outstanding: {currency(selectedCustomerOutstanding)}</p> : null}
+                      {customerName.trim() && selectedCustomerDiscountLimit > 0 ? <p className="form-hint">Discount Limit: {currency(selectedCustomerDiscountLimit)}</p> : null}
+                      {customerName.trim() && selectedCustomerBundleDiscountLimit > 0 ? <p className="form-hint">Bundle Discount Limit: {currency(selectedCustomerBundleDiscountLimit)} per bundle</p> : null}
+                      {customerName.trim() && selectedCustomerDiscountLimit > 0 && cartDiscountTotal > selectedCustomerDiscountLimit ? (
+                        <p className="form-hint outstanding-text">Current discount {currency(cartDiscountTotal)} exceeds allowed limit.</p>
+                      ) : null}
+                      {selectedBundleViolation ? (
+                        <p className="form-hint outstanding-text">
+                          {selectedBundleViolation.lineName} exceeds bundle discount limit. Allowed {currency(selectedBundleViolation.allowedBundleDiscount)} for {selectedBundleViolation.fullBundles} bundle(s).
+                        </p>
+                      ) : null}
+                      {customerName.trim() && selectedCustomerAvailableCredit > 0 ? (
+                        <>
+                          <p className="form-hint">Available Credit: {currency(selectedCustomerAvailableCredit)}</p>
+                          <label className="form-hint">Apply Customer Credit</label>
+                          <div className="checkout-inline-action">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={customerCreditDraft}
+                              onChange={(e) => setCustomerCreditDraft(e.target.value)}
+                              placeholder="Customer credit amount"
+                            />
+                            <button type="button" className="ghost" onClick={() => setCustomerCreditDraft(String(selectedCustomerAvailableCredit))}>
+                              Use Full
+                            </button>
+                          </div>
+                          {appliedCustomerCredit > 0 ? <p className="form-hint">Credit applied: {currency(appliedCustomerCredit)} • Payable now: {currency(totalAfterCustomerCredit)}</p> : null}
+                        </>
+                      ) : null}
+                      {selectedSavedCustomer ? (
+                        <>
+                          <label className="form-hint">Customer Tel</label>
+                          <div className="checkout-inline-action">
+                            <input
+                              value={customerPhoneDraft}
+                              onChange={(e) => setCustomerPhoneDraft(e.target.value)}
+                              placeholder="Customer phone"
+                            />
+                            <button type="button" className="ghost" onClick={saveBillingCustomerPhone} disabled={savingCustomerPhone}>
+                              {savingCustomerPhone ? "Saving..." : "Save"}
+                            </button>
+                          </div>
+                        </>
+                      ) : null}
+                      <label className="form-hint">Bill Discount Applied in Cart</label>
+                      <select value={lorry} onChange={(e) => setLorry(e.target.value)}>
+                        <option value="">Select delivery lorry</option>
+                        {lorryLoadRows.map((row) => {
+                          const remaining = Math.max(0, LORRY_CAPACITY - row.load);
+                          const full = !row.isOverflow && remaining <= 0;
+                          return (
+                            <option key={row.name} value={row.name} disabled={full}>
+                              {row.isOverflow
+                                ? `${row.name} - Overflow bucket`
+                                : (full ? `${row.name} - Lorry is full` : `${row.name} - ${remaining} left`)}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <div className="form-hint lorry-capacity-note">
+                        {lorryLoadRows.map((row) => {
+                          const remaining = Math.max(0, LORRY_CAPACITY - row.load);
+                          return (
+                            <span key={row.name} className={!row.isOverflow && remaining <= 0 ? "outstanding-text" : ""}>
+                              {row.isOverflow
+                                ? `${row.name}: ${row.load} queued`
+                                : `${row.name}: ${row.load}/${LORRY_CAPACITY} ${remaining <= 0 ? "• Lorry is full" : `• ${remaining} left`}`}
+                            </span>
+                          );
+                        })}
+                      </div>
+                      <select value={paymentType} onChange={(e) => setPaymentType(e.target.value)}>
+                        {PAYMENT_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                      </select>
+                      <p className="form-hint">Payment will be collected and confirmed at delivery.</p>
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+            </div>
+
+            {repBillingStep !== "cart" ? (
+              <div className="rep-wizard-footer">
+              <div className="rep-wizard-footer-copy">
+                <strong>{repBillingSteps[repBillingStepIndex]?.label}</strong>
+                <p>{customerName ? `${customerName} • ${cart.length} item(s)` : "Follow each step to finish the bill."}</p>
+              </div>
+              <div className="rep-wizard-footer-actions">
+                {repBillingStep !== "customer" ? (
+                  <button
+                    type="button"
+                    className="ghost rep-nav-circle rep-nav-circle-back"
+                    onClick={() => setRepBillingStep(repBillingSteps[Math.max(0, repBillingStepIndex - 1)].key)}
+                    aria-label="Back"
+                  >
+                    <span className="rep-nav-action-icon" aria-hidden="true">{"<"}</span>
+                  </button>
+                ) : (
+                  <span className="rep-nav-placeholder" aria-hidden="true" />
+                )}
+
+                {repBillingStep === "customer" ? (
+                  <button type="button" className="rep-nav-circle rep-nav-circle-next" aria-label="Next" onClick={() => setRepBillingStep("items")} disabled={!customerName.trim()}>
+                    <span className="rep-nav-action-icon" aria-hidden="true">{">"}</span>
+                  </button>
+                ) : null}
+                {repBillingStep === "items" ? (
+                  <button type="button" className="rep-nav-circle rep-nav-circle-next" aria-label="Next" onClick={() => setRepBillingStep("cart")} disabled={!cart.length}>
+                    <span className="rep-nav-action-icon" aria-hidden="true">{">"}</span>
+                  </button>
+                ) : null}
+                {repBillingStep === "checkout" ? (
+                  <button className="checkout rep-nav-action rep-nav-action-complete" type="button" onClick={checkout} disabled={!cart.length || savingCheckout}>
+                    <span>{savingCheckout ? "Wait..." : "Done"}</span>
+                    <span className="rep-nav-action-icon" aria-hidden="true">✓</span>
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+        </section>
+          {cart.length && repBillingStep !== "cart" ? (
+            <button type="button" className="rep-cart-fab" onClick={() => setShowCartPopup(true)} aria-label="Open cart">
+              <span>{cart.length}</span>
+              Cart
+            </button>
+          ) : null}
         </main>
       ) : null}
-
       {cashierPage === "returns" ? (
         <main className="grid">
           <section className="panel">
@@ -2191,13 +2473,224 @@ const CashierView = ({
         </main>
       ) : null}
 
-      {cashierPage === "billing" ? (
-        <div className="mobile-quickbar">
-          <div>
-            <p>{cart.length} item(s)</p>
-            <strong>{currency(totals.total)}</strong>
+      {showCustomerPicker ? (
+        <div className="low-stock-modal rep-fullscreen-sheet-backdrop" onClick={() => setShowCustomerPicker(false)}>
+          <div className="low-stock-modal-card rep-fullscreen-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Select Customer</h3>
+              <button type="button" className="ghost" onClick={() => setShowCustomerPicker(false)}>Close</button>
+            </div>
+            <div className="rep-fullscreen-sheet-body">
+              <input
+                className="search-icon-input rep-step-input"
+                value={customerName}
+                onChange={(e) => {
+                  setCustomerName(e.target.value);
+                  setShowCustomerSuggestions(true);
+                }}
+                onFocus={() => setShowCustomerSuggestions(true)}
+                placeholder="Search customer"
+              />
+              <div className="rep-step-list rep-step-customer-list rep-sheet-list">
+                {filteredCustomerOptions.length ? filteredCustomerOptions.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className="rep-step-list-row"
+                    onClick={() => {
+                      setCustomerName(name);
+                      setShowCustomerSuggestions(false);
+                      setShowCustomerPicker(false);
+                    }}
+                  >
+                    <div>
+                      <strong>{name}</strong>
+                      <p>{customerOutstandingMap.get(name) ? `Outstanding ${currency(customerOutstandingMap.get(name))}` : "No outstanding"}</p>
+                    </div>
+                    <span>Use</span>
+                  </button>
+                )) : <p className="form-hint">Type the customer name to search.</p>}
+              </div>
+            </div>
           </div>
-          <button type="button" onClick={checkout} disabled={!cart.length || savingCheckout}>{savingCheckout ? "Saving..." : "Complete Sale"}</button>
+        </div>
+      ) : null}
+      {showCartPopup ? (
+        <div className="low-stock-modal rep-fullscreen-sheet-backdrop" onClick={() => setShowCartPopup(false)}>
+          <div className="low-stock-modal-card kiosk-cart-popup" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>My Cart</h3>
+              <button type="button" className="ghost" onClick={() => setShowCartPopup(false)}>Close</button>
+            </div>
+            <div className="kiosk-cart-popup-body">
+              <div className="list cart-list rep-cart-list rep-sheet-list">
+                {cart.length ? cart.map((line) => (
+                  <article className="list-row rep-cart-step-row" key={`sheet-${line.productId}`}>
+                    <div className="cart-line-head">
+                      <strong>{line.name}</strong>
+                      <p>{currency(lineBasePrice(line))} each • Item Disc {currency(lineItemDiscount(line))} • Net {currency(lineFinalPrice(line))}</p>
+                    </div>
+                    <div className="cart-line-controls">
+                      <div className="rep-cart-qty-cluster">
+                        <div className="qty-box">
+                          <button type="button" onClick={() => updateQty(line.productId, line.quantity - 1)}>-</button>
+                          <span>{line.quantity}</span>
+                          <button type="button" onClick={() => updateQty(line.productId, line.quantity + 1)}>+</button>
+                        </div>
+                        {getBundleSize(line) > 0 ? (
+                          <div className="rep-cart-bundle-actions">
+                            <button type="button" className="rep-cart-bundle-step rep-cart-bundle-step-down" onClick={() => updateQtyByBundle(line, "down")}>-1 Bundle</button>
+                            <button type="button" className="rep-cart-bundle-step rep-cart-bundle-step-up" onClick={() => updateQtyByBundle(line, "up")}>+1 Bundle</button>
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="rep-cart-discount-row" onClick={(e) => e.stopPropagation()}>
+                        <select
+                          className="rep-cart-discount-mode"
+                          value={line.itemDiscountMode || "amount"}
+                          onChange={(e) => updateItemDiscountMode(line.productId, e.target.value)}
+                        >
+                          <option value="amount">Rs.</option>
+                          <option value="percent">%</option>
+                        </select>
+                        <input
+                          className="rep-cart-discount-input"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={line.itemDiscount ?? 0}
+                          onChange={(e) => updateItemDiscount(line.productId, e.target.value)}
+                          placeholder="Item discount"
+                        />
+                        {lineItemDiscount(line) > 0 ? (
+                          <strong className="rep-cart-discount-applied">-{currency(lineItemDiscount(line))}</strong>
+                        ) : null}
+                      </div>
+                    </div>
+                  </article>
+                )) : <p className="form-hint">Cart is empty.</p>}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {showItemSizePicker ? (
+        <div className="low-stock-modal rep-fullscreen-sheet-backdrop" onClick={() => setShowItemSizePicker(false)}>
+          <div className="low-stock-modal-card rep-fullscreen-sheet rep-size-products-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>{activeItemSize || "Select Size"} Items</h3>
+              <button type="button" className="ghost" onClick={() => setShowItemSizePicker(false)}>Close</button>
+            </div>
+            <div className="rep-fullscreen-sheet-body">
+              <input
+                className="search-icon-input rep-step-input"
+                value={sizeProductSearch}
+                onChange={(e) => setSizeProductSearch(e.target.value)}
+                placeholder="Search product / sku / category"
+              />
+              <div className="rep-step-list rep-step-product-list rep-sheet-list">
+                {activeSizeProducts.length ? activeSizeProducts.map((product) => (
+                  <article
+                    key={`size-${product.id}`}
+                    className={`rep-product-pick-card ${expandedSizeProductId === String(product.id) ? "expanded" : "collapsed"}`}
+                    onClick={() => setExpandedSizeProductId((current) => (current === String(product.id) ? "" : String(product.id)))}
+                  >
+                    <div className="rep-product-pick-copy">
+                      <strong>{productDisplayName(product)}</strong>
+                      <p>{product.sku} • {product.category}</p>
+                      <p>{currency(productSalePrice(product))} • <span className={getCatalogStock(product) <= lowStockThreshold ? "stock-low-text" : ""}>Stock {getCatalogStock(product)}</span></p>
+                      {getBundleSize(product) > 0 ? <p className="catalog-bundle-rule">{getBundleSize(product)} units = 1 bundle</p> : null}
+                      {expandedSizeProductId !== String(product.id) ? <p className="catalog-edit-hint">Tap card to edit qty</p> : null}
+                    </div>
+                    {expandedSizeProductId === String(product.id) ? (
+                    <div className="rep-product-pick-actions" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="number"
+                        min="1"
+                        value={catalogQtyDrafts[product.id] ?? ""}
+                        onChange={(e) => setCatalogQtyDrafts((current) => ({ ...current, [product.id]: e.target.value }))}
+                        placeholder="Custom qty"
+                        className="catalog-qty-input"
+                      />
+                      <div className="catalog-quick-groups">
+                        {getBundleSize(product) > 0 ? (
+                          <div className="catalog-quick-group catalog-quick-group-bundle">
+                            <span className="catalog-quick-group-label">Bundles</span>
+                            <div className="catalog-quick-group-actions">
+                              <button
+                                className="catalog-bundle-minus-btn"
+                                type="button"
+                                onTouchStart={triggerAddHaptic}
+                                onPointerDown={triggerAddHaptic}
+                                onClick={() => removeFromCartWithQty(product, getBundleSize(product))}
+                                disabled={Number(cartQtyByProduct.get(product.id) || 0) < getBundleSize(product)}
+                              >
+                                -1
+                              </button>
+                              <button
+                                className="catalog-bundle-btn"
+                                type="button"
+                                onTouchStart={triggerAddHaptic}
+                                onPointerDown={triggerAddHaptic}
+                                onClick={() => addToCartWithQty(product, getBundleSize(product))}
+                                disabled={getCatalogStock(product) < getBundleSize(product)}
+                              >
+                                +1
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                        <div className="catalog-quick-group catalog-quick-group-single">
+                          <span className="catalog-quick-group-label">Singles</span>
+                          <div className="catalog-quick-group-actions">
+                            <button
+                              className="catalog-single-minus-btn"
+                              type="button"
+                              onTouchStart={triggerAddHaptic}
+                              onPointerDown={triggerAddHaptic}
+                              onClick={() => removeFromCartWithQty(product, 1)}
+                              disabled={Number(cartQtyByProduct.get(product.id) || 0) <= 0}
+                            >
+                              -1
+                            </button>
+                            <button
+                              className="catalog-single-btn"
+                              type="button"
+                              onTouchStart={triggerAddHaptic}
+                              onPointerDown={triggerAddHaptic}
+                              onClick={() => addToCartWithQty(product, 1)}
+                              disabled={getCatalogStock(product) <= 0}
+                            >
+                              +1
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        className="add-feedback-btn"
+                        type="button"
+                        onTouchStart={triggerAddHaptic}
+                        onPointerDown={triggerAddHaptic}
+                        onClick={() => addToCart(product)}
+                        disabled={
+                          getCatalogStock(product) <= 0
+                          || !Number.isFinite(Number(catalogQtyDrafts[product.id]))
+                          || Math.floor(Number(catalogQtyDrafts[product.id])) <= 0
+                        }
+                      >
+                        Add Qty
+                      </button>
+                      <p className="catalog-in-cart-chip">
+                        In cart: {Number(cartQtyByProduct.get(product.id) || 0)}
+                        {getBundleSize(product) > 0 ? ` (${Math.floor(Number(cartQtyByProduct.get(product.id) || 0) / getBundleSize(product))} bundle${Math.floor(Number(cartQtyByProduct.get(product.id) || 0) / getBundleSize(product)) === 1 ? "" : "s"} + ${Number(cartQtyByProduct.get(product.id) || 0) % getBundleSize(product)} single${(Number(cartQtyByProduct.get(product.id) || 0) % getBundleSize(product)) === 1 ? "" : "s"})` : " singles"}
+                      </p>
+                    </div>
+                    ) : null}
+                  </article>
+                )) : <p className="form-hint">No items in this size for the current search.</p>}
+              </div>
+            </div>
+          </div>
         </div>
       ) : null}
       {showAddCustomer ? (
@@ -2233,16 +2726,7 @@ const CashierView = ({
           </div>
         </div>
       ) : null}
-      {cashierPage === "billing" ? (
-        <button type="button" className="add-customer-fab" onClick={quickAddCustomer} title="Add customer">
-          <span className="fab-plus">+</span>
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <circle cx="12" cy="8" r="4" />
-            <path d="M4 20c0-4.5 3.6-8 8-8s8 3.5 8 8" />
-          </svg>
-        </button>
-      ) : null}
-    </>
+    </div>
   );
 };
 
@@ -2258,6 +2742,7 @@ const REPORT_SUBPAGES = [
 const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleDeleted, user }) => {
   const [showLowStock, setShowLowStock] = useState(false);
   const [showChequeAlertDetails, setShowChequeAlertDetails] = useState(false);
+  const [showChequeSummaryDetails, setShowChequeSummaryDetails] = useState(false);
   const [showCreditLimitAlertDetails, setShowCreditLimitAlertDetails] = useState(false);
   const [selectedRep, setSelectedRep] = useState("");
   const [chartDateFrom, setChartDateFrom] = useState("");
@@ -2269,6 +2754,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [itemDateTo, setItemDateTo] = useState("");
   const [salesDateFrom, setSalesDateFrom] = useState("");
   const [salesDateTo, setSalesDateTo] = useState("");
+  const [salesTimeFrom, setSalesTimeFrom] = useState("");
+  const [salesTimeTo, setSalesTimeTo] = useState("");
   const [loadingDateFrom, setLoadingDateFrom] = useState("");
   const [loadingDateTo, setLoadingDateTo] = useState("");
   const [loadingTimeFrom, setLoadingTimeFrom] = useState("");
@@ -2288,6 +2775,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [deliveryLorry, setDeliveryLorry] = useState("all");
   const [deliveryDateFrom, setDeliveryDateFrom] = useState("");
   const [deliveryDateTo, setDeliveryDateTo] = useState("");
+  const [deliveryTimeFrom, setDeliveryTimeFrom] = useState("");
+  const [deliveryTimeTo, setDeliveryTimeTo] = useState("");
+  const [deliveriesView, setDeliveriesView] = useState("deliveries");
   const [deliveryReportDateFrom, setDeliveryReportDateFrom] = useState("");
   const [deliveryReportDateTo, setDeliveryReportDateTo] = useState("");
   const [dashboardProfitDateFrom, setDashboardProfitDateFrom] = useState("");
@@ -2496,8 +2986,30 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   }, [state.products]);
 
   const reportSales = useMemo(
-    () => (state.sales || []).filter((sale) => inDateRange(sale.createdAt, salesDateFrom, salesDateTo)),
-    [state.sales, salesDateFrom, salesDateTo]
+    () => (state.sales || []).filter((sale) => {
+      const saleDate = toColomboDateKey(sale.createdAt);
+      if (!saleDate) return false;
+      const saleTime = toColomboTimeKey(sale.createdAt);
+      const safeSaleTime = saleTime || "00:00";
+      const saleDateTimeKey = `${saleDate} ${safeSaleTime}`;
+
+      if (salesDateFrom) {
+        const fromDateTimeKey = `${salesDateFrom} ${salesTimeFrom || "00:00"}`;
+        if (saleDateTimeKey < fromDateTimeKey) return false;
+      } else if (salesTimeFrom && safeSaleTime < salesTimeFrom) {
+        return false;
+      }
+
+      if (salesDateTo) {
+        const toDateTimeKey = `${salesDateTo} ${salesTimeTo || "23:59"}`;
+        if (saleDateTimeKey > toDateTimeKey) return false;
+      } else if (salesTimeTo && safeSaleTime > salesTimeTo) {
+        return false;
+      }
+
+      return true;
+    }),
+    [state.sales, salesDateFrom, salesDateTo, salesTimeFrom, salesTimeTo]
   );
 
   const itemReportSales = useMemo(
@@ -3171,15 +3683,42 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     () => Number(sortedSalesWiseRows.reduce((acc, row) => acc + Number(row.total || 0), 0).toFixed(2)),
     [sortedSalesWiseRows]
   );
+  const chequePaymentEntries = useMemo(() => {
+    return (state.sales || []).flatMap((sale) => (
+      salePayments(sale)
+        .filter((payment) => String(payment.method || "").toLowerCase() === "cheque")
+        .filter((payment) => Number(payment.amount || 0) > 0)
+        .map((payment, index) => ({
+          rowId: `${sale.id || "sale"}-${payment.id || index}-${payment.createdAt || sale.createdAt || ""}`,
+          saleId: sale.id || "-",
+          saleCreatedAt: sale.createdAt || "",
+          customer: sale.customerName || "Walk-in",
+          rep: sale.cashier || "-",
+          outstanding: Number(sale.outstandingAmount || 0),
+          amount: Number(payment.amount || 0),
+          chequeNo: payment.chequeNo || sale.chequeNo || "-",
+          chequeDate: payment.chequeDate || sale.chequeDate || "-",
+          bank: payment.chequeBank || sale.chequeBank || "-",
+          createdAtTs: new Date(payment.createdAt || sale.createdAt || 0).getTime()
+        }))
+    ));
+  }, [state.sales]);
   const chequeReportSummary = useMemo(() => {
-    const chequeSales = reportSales.filter((sale) => Number(sale.chequeAmount || 0) > 0);
-    const chequeCount = chequeSales.length;
-    const totalChequeAmount = Number(chequeSales.reduce((acc, sale) => acc + Number(sale.chequeAmount || sale.paidAmount || 0), 0).toFixed(2));
-    const totalOutstanding = Number(chequeSales.reduce((acc, sale) => acc + Number(sale.outstandingAmount || 0), 0).toFixed(2));
+    const chequeCount = chequePaymentEntries.length;
+    const totalChequeAmount = Number(chequePaymentEntries.reduce((acc, row) => acc + Number(row.amount || 0), 0).toFixed(2));
+    const outstandingBySale = new Map();
+    for (const row of chequePaymentEntries) {
+      const key = String(row.saleId || "");
+      if (!key) continue;
+      if (!outstandingBySale.has(key)) outstandingBySale.set(key, Number(row.outstanding || 0));
+    }
+    const totalOutstanding = Number(
+      [...outstandingBySale.values()].reduce((acc, value) => acc + Number(value || 0), 0).toFixed(2)
+    );
     const avgChequeAmount = chequeCount ? Number((totalChequeAmount / chequeCount).toFixed(2)) : 0;
-    const latestCheque = chequeSales
+    const latestCheque = chequePaymentEntries
       .slice()
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+      .sort((a, b) => b.createdAtTs - a.createdAtTs)[0];
     return {
       chequeCount,
       totalChequeAmount,
@@ -3187,9 +3726,25 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       avgChequeAmount,
       latestChequeNo: latestCheque?.chequeNo || "-",
       latestChequeDate: latestCheque?.chequeDate || "-",
-      latestChequeBank: latestCheque?.chequeBank || "-"
+      latestChequeBank: latestCheque?.bank || "-"
     };
-  }, [reportSales]);
+  }, [chequePaymentEntries]);
+  const chequeSummaryRows = useMemo(() => {
+    return chequePaymentEntries
+      .map((row) => ({
+        rowId: row.rowId,
+        saleId: row.saleId,
+        date: row.saleCreatedAt ? new Date(row.saleCreatedAt).toLocaleDateString() : "-",
+        customer: row.customer,
+        amount: Number(row.amount || 0),
+        chequeNo: row.chequeNo,
+        chequeDate: row.chequeDate,
+        bank: row.bank,
+        rep: row.rep,
+        createdAtTs: row.createdAtTs
+      }))
+      .sort((a, b) => b.createdAtTs - a.createdAtTs);
+  }, [chequePaymentEntries]);
   const repOutstandingRows = useMemo(() => {
     const map = new Map();
     for (const sale of reportSales) {
@@ -3276,7 +3831,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
   const deliveryRows = useMemo(() => {
     const rows = (state.sales || [])
-      .filter((sale) => inDateRange(sale.createdAt, deliveryDateFrom, deliveryDateTo))
+      .filter((sale) => inDateTimeRange(sale.createdAt, deliveryDateFrom, deliveryDateTo, deliveryTimeFrom, deliveryTimeTo))
       .filter((sale) => (deliveryLorry === "all" ? true : sale.lorry === deliveryLorry))
       .map((sale) => {
         const undeliveredQty = (sale.deliveryAdjustments || []).reduce(
@@ -3297,7 +3852,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         };
       });
     return rows.sort((a, b) => new Date(b.sale.createdAt).getTime() - new Date(a.sale.createdAt).getTime());
-  }, [state.sales, deliveryDateFrom, deliveryDateTo, deliveryLorry]);
+  }, [state.sales, deliveryDateFrom, deliveryDateTo, deliveryTimeFrom, deliveryTimeTo, deliveryLorry]);
   const sortedDeliveryRows = useMemo(
     () => sortRows(deliveryRows, "deliveries", "when", {
       id: (row) => Number(row.id || 0),
@@ -3309,6 +3864,45 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     }),
     [deliveryRows, tableSort]
   );
+  const notDeliveredRows = useMemo(() => {
+    const rows = [];
+    for (const sale of (state.sales || [])) {
+      if (deliveryLorry !== "all" && sale.lorry !== deliveryLorry) continue;
+      for (const adjustment of (sale.deliveryAdjustments || [])) {
+        const adjustmentAt = adjustment?.createdAt || sale.deliveryConfirmedAt || sale.createdAt;
+        if (!inDateTimeRange(adjustmentAt, deliveryDateFrom, deliveryDateTo, deliveryTimeFrom, deliveryTimeTo)) continue;
+        for (const line of (adjustment.lines || [])) {
+          const qty = Number(line.quantity || 0);
+          if (qty <= 0) continue;
+          const matchedSaleLine = (sale.lines || []).find((saleLine) => String(saleLine.productId || "") === String(line.productId || ""));
+          const unitPrice = Number(matchedSaleLine?.price || matchedSaleLine?.basePrice || 0);
+          rows.push({
+            key: `${sale.id}-${line.productId}-${adjustmentAt}`,
+            saleId: sale.id || "-",
+            when: adjustmentAt ? new Date(adjustmentAt).toLocaleString() : "-",
+            rep: sale.cashier || "-",
+            lorry: sale.lorry || "-",
+            customer: sale.customerName || "Walk-in",
+            item: line.name || matchedSaleLine?.name || line.productId || "-",
+            qty,
+            value: Number((unitPrice * qty).toFixed(2)),
+            createdAtTs: new Date(adjustmentAt || 0).getTime()
+          });
+        }
+      }
+    }
+    return rows.sort((a, b) => Number(b.createdAtTs || 0) - Number(a.createdAtTs || 0));
+  }, [state.sales, deliveryLorry, deliveryDateFrom, deliveryDateTo, deliveryTimeFrom, deliveryTimeTo]);
+  const notDeliveredItemRows = useMemo(() => {
+    const map = new Map();
+    for (const row of notDeliveredRows) {
+      const key = String(row.item || "-").trim() || "-";
+      map.set(key, Number(map.get(key) || 0) + Number(row.qty || 0));
+    }
+    return Array.from(map.entries())
+      .map(([item, qty]) => ({ item, qty: Number(qty || 0) }))
+      .sort((a, b) => String(a.item || "").localeCompare(String(b.item || "")));
+  }, [notDeliveredRows]);
 
   const deliveryReportSales = useMemo(
     () => (state.sales || [])
@@ -3811,6 +4405,84 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     </table>
     <div class="footer">
       <div>Generated on ${escapeHtml(generatedAt)}</div>
+      <div>J&amp;Co. Software Solutions</div>
+    </div>
+  </div>
+</body>
+</html>`;
+    printWindow.document.open();
+    printWindow.document.write(printHtml);
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => printWindow.print(), 250);
+  };
+
+  const printNotDeliveredReport = (rows) => {
+    const printWindow = window.open("", "_blank", "width=1200,height=900");
+    if (!printWindow) {
+      setNotice("Allow popups to print not delivered report.");
+      return;
+    }
+    const fromLabel = deliveryDateFrom ? `${deliveryDateFrom}${deliveryTimeFrom ? ` ${deliveryTimeFrom}` : ""}` : "-";
+    const toLabel = deliveryDateTo ? `${deliveryDateTo}${deliveryTimeTo ? ` ${deliveryTimeTo}` : ""}` : "-";
+    const rangeLabel = `${fromLabel} to ${toLabel}`;
+    const lorryLabel = deliveryLorry === "all" ? "All Lorries" : deliveryLorry;
+    const totalQty = Number((rows || []).reduce((sum, row) => sum + Number(row.qty || 0), 0));
+    const totalValue = Number((notDeliveredRows || []).reduce((sum, row) => sum + Number(row.value || 0), 0).toFixed(2));
+    const bodyRows = (rows || []).length
+      ? rows.map((row) => `
+        <tr>
+          <td>${escapeHtml(String(row.item || "-"))}</td>
+          <td>${Number(row.qty || 0)}</td>
+        </tr>
+      `).join("")
+      : `<tr><td colspan="2">No not-delivered items found for the selected range.</td></tr>`;
+    const printHtml = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Not Delivered Report</title>
+  <style>
+    @page { size: A4 landscape; margin: 10mm; }
+    body { margin: 0; background: #fff; font-family: "Segoe UI", Arial, sans-serif; color: #122640; }
+    .sheet { width: 100%; margin: 0 auto; }
+    .head { border: 1px solid #cdd9e8; border-radius: 16px; padding: 12px 14px; background: linear-gradient(135deg, #fbfdff 0%, #eef4fc 46%, #e2ecfa 100%); }
+    .head h1 { margin: 0; font-size: 24px; line-height: 1.05; }
+    .head p { margin: 6px 0 0; color: #4e647d; font-size: 13px; }
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+    .summary article { border: 1px solid #d2ddea; border-radius: 12px; padding: 8px 10px; background: #f7fbff; }
+    .summary span { display: block; color: #536980; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .summary strong { display: block; margin-top: 4px; font-size: 18px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    th, td { border: 1px solid #afbdd0; padding: 8px 9px; font-size: 12px; }
+    th { background: #e5edf8; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; text-align: left; }
+    td:nth-child(2), th:nth-child(2) { text-align: right; }
+    .footer { margin-top: 14px; display: flex; justify-content: space-between; gap: 12px; color: #5b6f86; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="sheet">
+    <div class="head">
+      <h1>Not Delivered Report</h1>
+      <p>Date/Time Range: ${escapeHtml(rangeLabel)} | Lorry: ${escapeHtml(lorryLabel)}</p>
+    </div>
+    <div class="summary">
+      <article><span>Rows</span><strong>${Number(rows?.length || 0)}</strong></article>
+      <article><span>ND Qty</span><strong>${totalQty}</strong></article>
+      <article><span>ND Value</span><strong>LKR ${formatLkrValue(totalValue)}</strong></article>
+      <article><span>Generated</span><strong>${escapeHtml(new Date().toLocaleString())}</strong></article>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Item</th>
+          <th>ND Qty</th>
+        </tr>
+      </thead>
+      <tbody>${bodyRows}</tbody>
+    </table>
+    <div class="footer">
+      <div>Pepsi Distributor POS</div>
       <div>J&amp;Co. Software Solutions</div>
     </div>
   </div>
@@ -5334,7 +6006,27 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 
           {activePage === "deliveries" ? (
             <section className="admin-mobile-section deliveries-page">
-              <h2>Deliveries</h2>
+              <div className="deliveries-head-row">
+                <h2>Deliveries</h2>
+                <div className="deliveries-head-actions">
+                  {deliveriesView === "not-delivered" ? (
+                    <button
+                      type="button"
+                      className="receipt-print-action deliveries-head-action-btn deliveries-head-print-btn"
+                      onClick={() => printNotDeliveredReport(notDeliveredItemRows)}
+                    >
+                      Print
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="ghost deliveries-head-action-btn deliveries-head-toggle-btn"
+                    onClick={() => setDeliveriesView((current) => (current === "deliveries" ? "not-delivered" : "deliveries"))}
+                  >
+                    {deliveriesView === "deliveries" ? "Not Delivered" : "Back to Deliveries"}
+                  </button>
+                </div>
+              </div>
               <div className="rep-date-filters">
                 <select value={deliveryLorry} onChange={(e) => setDeliveryLorry(e.target.value)}>
                   <option value="all">All Lorries</option>
@@ -5348,7 +6040,32 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   <span>To</span>
                   <input type="date" value={deliveryDateTo} onChange={(e) => setDeliveryDateTo(e.target.value)} />
                 </label>
+                <label className="rep-date-field">
+                  <span>From Time</span>
+                  <input type="time" value={deliveryTimeFrom} onChange={(e) => setDeliveryTimeFrom(e.target.value)} />
+                </label>
+                <label className="rep-date-field">
+                  <span>To Time</span>
+                  <input type="time" value={deliveryTimeTo} onChange={(e) => setDeliveryTimeTo(e.target.value)} />
+                </label>
               </div>
+              {deliveriesView === "not-delivered" ? (
+                <>
+                  <div className="admin-table deliveries-report-table not-delivered-min-table">
+                    <header>
+                      <span>Item</span>
+                      <span>ND Qty</span>
+                    </header>
+                    {notDeliveredItemRows.length ? notDeliveredItemRows.map((row) => (
+                      <article key={`nd-item-${row.item}`}>
+                        <span>{row.item}</span>
+                        <span>{row.qty}</span>
+                      </article>
+                    )) : <p>No not-delivered items found for selected range.</p>}
+                  </div>
+                </>
+              ) : (
+                <>
               <input
                 className="search-icon-input imperfect-search-input"
                 value={deliveriesSearch}
@@ -5442,6 +6159,8 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   </article>
                 )) : <p>No delivered item records for selected filters.</p>}
               </div>
+                </>
+              )}
             </section>
           ) : null}
 
@@ -5738,6 +6457,28 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                     <span>To</span>
                     <input type="date" value={salesDateTo} onChange={(e) => setSalesDateTo(e.target.value)} />
                   </label>
+                  <label className="rep-date-field">
+                    <span>From Time</span>
+                    <input type="time" value={salesTimeFrom} onChange={(e) => setSalesTimeFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To Time</span>
+                    <input type="time" value={salesTimeTo} onChange={(e) => setSalesTimeTo(e.target.value)} />
+                  </label>
+                </div>
+                <div className="row" style={{ justifyContent: "flex-end", marginTop: "-0.2rem", marginBottom: "0.2rem" }}>
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => {
+                      setSalesDateFrom(loadingDateFrom || "");
+                      setSalesDateTo(loadingDateTo || "");
+                      setSalesTimeFrom(loadingTimeFrom || "");
+                      setSalesTimeTo(loadingTimeTo || "");
+                    }}
+                  >
+                    Use Loadings Date/Time Range
+                  </button>
                 </div>
                 <div className="sales-range-kpi">
                   <span className="sales-range-kpi-label">Selected Range Total Sale Value</span>
@@ -5782,7 +6523,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                           onClick={() => deleteAdminSale(row.raw)}
                           disabled={deletingSaleId === String(row.id) || Boolean(row.raw?.deliveryConfirmedAt) || Boolean((row.raw?.deliveryAdjustments || []).length)}
                         >
-                          {deletingSaleId === String(row.id) ? "..." : "🗑"}
+                          {deletingSaleId === String(row.id) ? "..." : "??"}
                         </button>
                       </span>
                     </article>
@@ -5795,7 +6536,18 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
               <section className="admin-mobile-section report-panel cheque-report-panel">
                 <h2>Cheque Summary</h2>
                 <div className="cheque-summary-grid">
-                  <article>
+                  <article
+                    role="button"
+                    tabIndex={0}
+                    className="cheque-summary-clickable"
+                    onClick={() => setShowChequeSummaryDetails(true)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setShowChequeSummaryDetails(true);
+                      }
+                    }}
+                  >
                     <span>Total Cheques</span>
                     <strong>{chequeReportSummary.chequeCount}</strong>
                   </article>
@@ -6130,7 +6882,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                               onClick={() => handleToggleLoadingRow(row)}
                               disabled={loadingMarkPendingKey === row.markKey}
                             >
-                              {loadingMarkPendingKey === row.markKey ? "Saving..." : row.loaded ? "Loaded ✓" : "Mark Loaded"}
+                              {loadingMarkPendingKey === row.markKey ? "Saving..." : row.loaded ? "Loaded ?" : "Mark Loaded"}
                             </button>
                           </span>
                         </article>
@@ -6732,6 +7484,44 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
         </div>
       ) : null}
 
+      {showChequeSummaryDetails ? (
+        <div className="low-stock-modal" onClick={() => setShowChequeSummaryDetails(false)}>
+          <div className="low-stock-modal-card cheque-alert-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="low-stock-modal-head">
+              <h3>Cheque Details</h3>
+              <button type="button" onClick={() => setShowChequeSummaryDetails(false)}>Close</button>
+            </div>
+            <p className="form-hint">
+              {chequeReportSummary.chequeCount} cheque{chequeReportSummary.chequeCount === 1 ? "" : "s"} • Total LKR {formatLkrValue(chequeReportSummary.totalChequeAmount)}
+            </p>
+            <div className="admin-table cheque-alert-table cheque-summary-details-table">
+              <header>
+                <span>Sale</span>
+                <span>Date</span>
+                <span>Customer</span>
+                <span>Amount</span>
+                <span>Cheque No</span>
+                <span>Cheque Date</span>
+                <span>Bank</span>
+                <span>Rep</span>
+              </header>
+              {chequeSummaryRows.length ? chequeSummaryRows.map((row) => (
+                <article key={`cheque-summary-${row.rowId}`}>
+                  <span>#{row.saleId}</span>
+                  <span>{row.date}</span>
+                  <span>{row.customer}</span>
+                  <span>LKR {formatLkrValue(row.amount)}</span>
+                  <span>{row.chequeNo}</span>
+                  <span>{row.chequeDate}</span>
+                  <span>{row.bank}</span>
+                  <span>{row.rep}</span>
+                </article>
+              )) : <p>No cheque records in selected range.</p>}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {showCreditLimitAlertDetails ? (
         <div className="low-stock-modal" onClick={() => setShowCreditLimitAlertDetails(false)}>
           <div className="low-stock-modal-card cheque-alert-modal-card" onClick={(e) => e.stopPropagation()}>
@@ -6806,6 +7596,7 @@ export const App = () => {
   const [confirmModal, setConfirmModal] = useState(null);
   const [authError, setAuthError] = useState("");
   const [session, setSession] = useState(null);
+  const [cashierBillingFocusMode, setCashierBillingFocusMode] = useState(false);
   const confirmResolverRef = useRef(null);
 
   const showErrorModal = (text) => {
@@ -7149,6 +7940,7 @@ const selectedBillingCustomer = useMemo(() => {
       });
       showSuccessModal("Order completed.");
       setCart([]);
+      setShowPostSaleHomeButton(true);
       setDiscountValue("");
       setCustomerCreditDraft("");
       setCashReceived("");
@@ -7170,8 +7962,10 @@ const selectedBillingCustomer = useMemo(() => {
   }
 
   return (
-    <div className="shell">
-      <Header dashboard={dashboard} user={session.user} onLogout={logout} managerFullAccess={Boolean(state?.settings?.managerFullAccess)} />
+    <div className={`shell ${session.user.role === "cashier" && cashierBillingFocusMode ? "cashier-billing-shell" : ""}`}>
+      {!(session.user.role === "cashier" && cashierBillingFocusMode) ? (
+        <Header dashboard={dashboard} user={session.user} onLogout={logout} managerFullAccess={Boolean(state?.settings?.managerFullAccess)} />
+      ) : null}
       {session.user.role === "cashier" ? (
         <CashierView
           state={state}
@@ -7218,6 +8012,8 @@ const selectedBillingCustomer = useMemo(() => {
             setMessage={setMessage}
             onSaleDeleted={applyLocalSaleDelete}
             onSuccess={showSuccessModal}
+            onLogout={logout}
+            onBillingFocusChange={setCashierBillingFocusMode}
             requestConfirm={requestConfirm}
             savingCheckout={savingCheckout}
             checkout={checkout}
@@ -7248,7 +8044,7 @@ const selectedBillingCustomer = useMemo(() => {
           <div className="low-stock-modal" onClick={() => setSuccessModal("")}>
             <div className="low-stock-modal-card success-modal-card" onClick={(e) => e.stopPropagation()}>
               <div className="low-stock-modal-head">
-                <h3><span className="success-modal-icon" aria-hidden="true">✔</span>Success</h3>
+                <h3><span className="success-modal-icon" aria-hidden="true">?</span>Success</h3>
                 <button type="button" onClick={() => setSuccessModal("")}>Close</button>
               </div>
               <p className="success-modal-text">{successModal}</p>
@@ -7273,3 +8069,5 @@ const selectedBillingCustomer = useMemo(() => {
       </div>
     );
   };
+
+
