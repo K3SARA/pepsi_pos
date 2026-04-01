@@ -3755,6 +3755,20 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
       }))
       .sort((a, b) => b.createdAtTs - a.createdAtTs);
   }, [chequePaymentEntries]);
+  const sortedChequeSummaryRows = useMemo(
+    () => sortRows(chequeSummaryRows, "chequeSummary", "createdAt", {
+      saleId: (row) => Number(row.saleId || 0),
+      date: (row) => String(row.date || ""),
+      customer: (row) => String(row.customer || ""),
+      amount: (row) => Number(row.amount || 0),
+      chequeNo: (row) => String(row.chequeNo || ""),
+      chequeDate: (row) => String(row.chequeDate || ""),
+      bank: (row) => String(row.bank || ""),
+      rep: (row) => String(row.rep || ""),
+      createdAt: (row) => Number(row.createdAtTs || 0)
+    }),
+    [chequeSummaryRows, tableSort]
+  );
   const repOutstandingRows = useMemo(() => {
     const map = new Map();
     for (const sale of reportSales) {
@@ -7506,16 +7520,16 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
             </p>
             <div className="admin-table cheque-alert-table cheque-summary-details-table">
               <header>
-                <span>Sale</span>
-                <span>Date</span>
-                <span>Customer</span>
-                <span>Amount</span>
-                <span>Cheque No</span>
-                <span>Cheque Date</span>
-                <span>Bank</span>
-                <span>Rep</span>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "saleId")}>Sale{sortMark("chequeSummary", "saleId")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "date")}>Date{sortMark("chequeSummary", "date")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "customer")}>Customer{sortMark("chequeSummary", "customer")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "amount")}>Amount{sortMark("chequeSummary", "amount")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "chequeNo")}>Cheque No{sortMark("chequeSummary", "chequeNo")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "chequeDate")}>Cheque Date{sortMark("chequeSummary", "chequeDate")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "bank")}>Bank{sortMark("chequeSummary", "bank")}</button>
+                <button type="button" className="th-sort" onClick={() => toggleSort("chequeSummary", "rep")}>Rep{sortMark("chequeSummary", "rep")}</button>
               </header>
-              {chequeSummaryRows.length ? chequeSummaryRows.map((row) => (
+              {sortedChequeSummaryRows.length ? sortedChequeSummaryRows.map((row) => (
                 <article key={`cheque-summary-${row.rowId}`}>
                   <span>#{row.saleId}</span>
                   <span>{row.date}</span>
