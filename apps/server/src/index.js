@@ -24,6 +24,7 @@ import {
 
 const BASE_LORRIES = ["Lorry A", "Lorry B"];
 const ORDER_LORRIES = ["Lorry A", "Lorry A Overflow", "Lorry B", "Lorry B Overflow"];
+const LORRY_CAPACITY = 2880;
 const BUSINESS_TIME_ZONE = "Asia/Colombo";
 const colomboDateFormatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: BUSINESS_TIME_ZONE,
@@ -38,6 +39,39 @@ const toColomboDateKey = (value = new Date()) => {
   } catch {
     return "";
   }
+};
+
+const isChequePaymentCollected = (payment, referenceDate = new Date()) => {
+  if (String(payment?.method || "").toLowerCase() !== "cheque") return true;
+  const chequeDateKey = toColomboDateKey(payment?.chequeDate);
+  if (!chequeDateKey) return true;
+  const todayKey = toColomboDateKey(referenceDate);
+  if (!todayKey) return true;
+  return chequeDateKey <= todayKey;
+};
+
+const buildLorryLoadMap = (state) => {
+  const next = ORDER_LORRIES.reduce((acc, name) => {
+    acc[name] = 0;
+    return acc;
+  }, {});
+  const resetAtMap = state?.settings?.lorryCountResetAt || {};
+  for (const sale of (state.sales || [])) {
+    const lorryName = String(sale.lorry || "").trim();
+    if (!(lorryName in next)) continue;
+    if (!BASE_LORRIES.includes(lorryName) && sale.deliveryConfirmedAt) continue;
+    const resetAt = String(resetAtMap[lorryName] || "").trim();
+    if (resetAt) {
+      const saleCreatedAtTs = new Date(sale.createdAt || 0).getTime();
+      const resetAtTs = new Date(resetAt).getTime();
+      if (Number.isFinite(saleCreatedAtTs) && Number.isFinite(resetAtTs) && saleCreatedAtTs <= resetAtTs) {
+        continue;
+      }
+    }
+    const saleQty = (sale.lines || []).reduce((acc, line) => acc + Number(line.quantity || 0), 0);
+    next[lorryName] += saleQty;
+  }
+  return next;
 };
 
 const managerHasFullAccess = (state = null) => Boolean((state || getState())?.settings?.managerFullAccess);
@@ -245,7 +279,10 @@ const recalculateSaleFinancials = (sale) => {
   const payments = normalizeSalePayments(sale);
   const cashPayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cash");
   const chequePayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cheque");
-  const allPaidPayments = payments.filter((payment) => Number(payment.amount || 0) > 0);
+  const allPaidPayments = payments.filter((payment) => {
+    if (!(Number(payment.amount || 0) > 0)) return false;
+    return isChequePaymentCollected(payment);
+  });
   const totalCash = totalPaymentsAmount(cashPayments);
   const totalCheque = totalPaymentsAmount(chequePayments);
   const latestCheque = chequePayments.length ? chequePayments[chequePayments.length - 1] : null;
@@ -962,6 +999,22 @@ app.post("/sales", requireAuth, requireRole("cashier", "admin"), (req, res) => {
       itemDiscountMode,
       price: Number(resolvedUnitPrice.toFixed(2))
     });
+  }
+
+  const currentOrderQty = preparedLines.reduce((acc, line) => acc + Number(line.quantity || 0), 0);
+  const lorryLoadMap = buildLorryLoadMap(state);
+  const pendingLoad = Number(lorryLoadMap[lorry] || 0);
+  if (BASE_LORRIES.includes(lorry)) {
+    if (pendingLoad >= LORRY_CAPACITY) {
+      res.status(409).json({ message: "Selected lorry is full." });
+      return;
+    }
+    if ((pendingLoad + currentOrderQty) > LORRY_CAPACITY) {
+      res.status(409).json({
+        message: `Selected lorry exceeds capacity. Only ${Math.max(0, LORRY_CAPACITY - pendingLoad)} items left.`
+      });
+      return;
+    }
   }
 
   const prepared = enrichSale({

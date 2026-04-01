@@ -134,6 +134,14 @@ const toColomboTimeKey = (value = new Date()) => {
     return "";
   }
 };
+const isChequePaymentPending = (payment, referenceDate = new Date()) => {
+  if (String(payment?.method || "").toLowerCase() !== "cheque") return false;
+  const chequeDateKey = toColomboDateKey(payment?.chequeDate);
+  if (!chequeDateKey) return false;
+  const todayKey = toColomboDateKey(referenceDate);
+  if (!todayKey) return false;
+  return chequeDateKey > todayKey;
+};
 const scrollViewportToTop = () => {
   if (typeof window === "undefined") return;
   window.scrollTo({ top: 0, left: 0, behavior: "auto" });
@@ -3339,6 +3347,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     for (const sale of (state.sales || [])) {
       for (const payment of salePayments(sale)) {
         if (String(payment.method || "").toLowerCase() !== "cheque") continue;
+        if (!isChequePaymentPending(payment)) continue;
         const chequeDate = localDateKey(payment.chequeDate);
         if (!chequeDate || chequeDate !== tomorrowKey) continue;
         rows.push({
@@ -3687,6 +3696,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     return (state.sales || []).flatMap((sale) => (
       salePayments(sale)
         .filter((payment) => String(payment.method || "").toLowerCase() === "cheque")
+        .filter((payment) => isChequePaymentPending(payment))
         .filter((payment) => Number(payment.amount || 0) > 0)
         .map((payment, index) => ({
           rowId: `${sale.id || "sale"}-${payment.id || index}-${payment.createdAt || sale.createdAt || ""}`,
