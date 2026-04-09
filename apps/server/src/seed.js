@@ -15,6 +15,7 @@ export const seedState = {
   ],
   sales: [],
   returns: [],
+  stockMovements: [],
   customers: [],
   staff: []
 };

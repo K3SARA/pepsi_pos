@@ -12,6 +12,7 @@ import {
   deleteSale,
   deleteStaff,
   deleteProduct,
+  fetchAppConfig,
   fetchDashboard,
   fetchMe,
   fetchState,
@@ -2771,6 +2772,9 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [customerReportSearch, setCustomerReportSearch] = useState("");
   const [customerPanelSearch, setCustomerPanelSearch] = useState("");
   const [stockPanelSearch, setStockPanelSearch] = useState("");
+  const [stockLogSearch, setStockLogSearch] = useState("");
+  const [stockLogDateFrom, setStockLogDateFrom] = useState("");
+  const [stockLogDateTo, setStockLogDateTo] = useState("");
   const [staffSearch, setStaffSearch] = useState("");
   const [deliveriesSearch, setDeliveriesSearch] = useState("");
   const [deliveredItemsSearch, setDeliveredItemsSearch] = useState("");
@@ -2780,6 +2784,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
   const [repOutstandingSearch, setRepOutstandingSearch] = useState("");
   const [reportDeliverySearch, setReportDeliverySearch] = useState("");
   const [loadingsSearch, setLoadingsSearch] = useState("");
+  const [selectedLoadingPanel, setSelectedLoadingPanel] = useState(ORDER_LORRIES[0]);
   const [deliveryLorry, setDeliveryLorry] = useState("all");
   const [deliveryDateFrom, setDeliveryDateFrom] = useState("");
   const [deliveryDateTo, setDeliveryDateTo] = useState("");
@@ -3556,6 +3561,50 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
     }),
     [adminReturnRows, tableSort]
   );
+  const filteredStockMovementRows = useMemo(() => {
+    const term = String(stockLogSearch || "").trim().toLowerCase();
+    return (state.stockMovements || [])
+      .filter((entry) => inDateRange(entry.at, stockLogDateFrom, stockLogDateTo))
+      .filter((entry) => {
+        if (!term) return true;
+        return [
+          entry.name,
+          entry.sku,
+          entry.by,
+          entry.action,
+          entry.productId
+        ].some((value) => String(value || "").toLowerCase().includes(term));
+      })
+      .map((entry) => ({
+        id: entry.id || `${entry.productId || "p"}-${entry.at || ""}`,
+        at: entry.at || "",
+        atLabel: entry.at ? new Date(entry.at).toLocaleString() : "-",
+        product: entry.name || "-",
+        sku: entry.sku || "-",
+        beforeStock: Number(entry.beforeStock || 0),
+        changeQty: Number(entry.changeQty || 0),
+        afterStock: Number(entry.afterStock || 0),
+        by: entry.by || "-",
+        action: String(entry.action || "-").replace(/_/g, " "),
+        atTs: new Date(entry.at || 0).getTime()
+      }));
+  }, [state.stockMovements, stockLogDateFrom, stockLogDateTo, stockLogSearch]);
+  const sortedStockMovementRows = useMemo(() => {
+    const getters = {
+      at: (row) => Number(row.atTs || 0),
+      product: (row) => String(row.product || ""),
+      sku: (row) => String(row.sku || ""),
+      beforeStock: (row) => Number(row.beforeStock || 0),
+      changeQty: (row) => Number(row.changeQty || 0),
+      afterStock: (row) => Number(row.afterStock || 0),
+      by: (row) => String(row.by || ""),
+      action: (row) => String(row.action || "")
+    };
+    if (!tableSort.stockLog) {
+      return [...filteredStockMovementRows].sort((a, b) => Number(b.atTs || 0) - Number(a.atTs || 0));
+    }
+    return sortRows(filteredStockMovementRows, "stockLog", "at", getters);
+  }, [filteredStockMovementRows, tableSort]);
 
   const stockSearchMatches = useMemo(() => {
     const term = stockSearch.trim().toLowerCase();
@@ -5887,6 +5936,51 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   )) : <p className="form-hint">No returned stock records yet.</p>}
                 </div>
               </div>
+              <div className="returned-stock-panel returned-stock-tech">
+                <h3>Stock Activity Log</h3>
+                <div className="rep-date-filters">
+                  <label className="rep-date-field">
+                    <span>From</span>
+                    <input type="date" value={stockLogDateFrom} onChange={(e) => setStockLogDateFrom(e.target.value)} />
+                  </label>
+                  <label className="rep-date-field">
+                    <span>To</span>
+                    <input type="date" value={stockLogDateTo} onChange={(e) => setStockLogDateTo(e.target.value)} />
+                  </label>
+                </div>
+                <input
+                  className="search-icon-input imperfect-search-input"
+                  value={stockLogSearch}
+                  onChange={(e) => setStockLogSearch(e.target.value)}
+                  placeholder="Search stock log by item / sku / user / action"
+                />
+                <div className="admin-table stock-log-table">
+                  <header>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "at")}>Date/Time{sortMark("stockLog", "at")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "product")}>Product{sortMark("stockLog", "product")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "sku")}>SKU{sortMark("stockLog", "sku")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "beforeStock")}>Before{sortMark("stockLog", "beforeStock")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "changeQty")}>Change{sortMark("stockLog", "changeQty")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "afterStock")}>After{sortMark("stockLog", "afterStock")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "by")}>By{sortMark("stockLog", "by")}</button>
+                    <button type="button" className="th-sort" onClick={() => toggleSort("stockLog", "action")}>Action{sortMark("stockLog", "action")}</button>
+                  </header>
+                  {sortedStockMovementRows.length ? sortedStockMovementRows.map((row) => (
+                    <article key={`stock-log-${row.id}`}>
+                      <span>{row.atLabel}</span>
+                      <span>{row.product}</span>
+                      <span>{row.sku}</span>
+                      <span>{Number(row.beforeStock || 0)}</span>
+                      <span className={Number(row.changeQty || 0) < 0 ? "low" : ""}>
+                        {Number(row.changeQty || 0) > 0 ? `+${row.changeQty}` : row.changeQty}
+                      </span>
+                      <span>{Number(row.afterStock || 0)}</span>
+                      <span>{row.by}</span>
+                      <span>{row.action}</span>
+                    </article>
+                  )) : <p className="form-hint">No stock activity found for selected range.</p>}
+                </div>
+              </div>
             </section>
           ) : null}
 
@@ -6842,7 +6936,21 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
                   Resets only the lorry capacity count used for new orders. Existing sales and loading reports stay unchanged.
                 </p>
               </section>
-              {LOADING_PANEL_CONFIG.map((panel) => {
+              <section className="admin-mobile-section loading-lorry-selector-panel">
+                <div className="loading-lorry-selector-grid">
+                  {LOADING_PANEL_CONFIG.map((panel) => (
+                    <button
+                      key={`loading-selector-${panel.name}`}
+                      type="button"
+                      className={`loading-lorry-selector-card${selectedLoadingPanel === panel.name ? " is-active" : ""}`}
+                      onClick={() => setSelectedLoadingPanel(panel.name)}
+                    >
+                      {panel.name}
+                    </button>
+                  ))}
+                </div>
+              </section>
+              {LOADING_PANEL_CONFIG.filter((panel) => panel.name === selectedLoadingPanel).map((panel) => {
                 const rows = (sortedLoadingByLorry[panel.name] || []).filter((row) => matchesSearch(loadingsSearch, row.name, row.sku, row.size, panel.name));
                 const summary = loadingSummaryByLorry[panel.name] || {};
                 return (
@@ -7598,6 +7706,7 @@ const AdminView = ({ state, dashboard, message, onError, requestConfirm, onSaleD
 export const App = () => {
   const [state, setState] = useState({ settings: {}, products: [], sales: [], returns: [] });
   const [dashboard, setDashboard] = useState({ salesCount: 0, todaySalesCount: 0, todayRevenue: 0, todayOutstanding: 0, lowStockItems: [] });
+  const [appConfig, setAppConfig] = useState({ appMode: "live", demo: { enabled: false, readOnly: false, hasSnapshot: false } });
   const [search, setSearch] = useState("");
   const [cashier, setCashier] = useState("");
   const [customerName, setCustomerName] = useState("");
@@ -7773,10 +7882,11 @@ const selectedBillingCustomer = useMemo(() => {
     const load = async () => {
       try {
         await fetchMe();
-        const [freshState, freshDashboard] = await Promise.all([fetchState(), fetchDashboard()]);
+        const [freshState, freshDashboard, freshConfig] = await Promise.all([fetchState(), fetchDashboard(), fetchAppConfig()]);
         if (!mounted) return;
         setState(freshState);
         setDashboard(freshDashboard);
+        setAppConfig(freshConfig || { appMode: "live", demo: { enabled: false, readOnly: false, hasSnapshot: false } });
       } catch (error) {
         if (mounted) showErrorModal(error.message);
       }
@@ -7987,6 +8097,11 @@ const selectedBillingCustomer = useMemo(() => {
 
   return (
     <div className={`shell ${session.user.role === "cashier" && cashierBillingFocusMode ? "cashier-billing-shell" : ""}`}>
+      {appConfig?.demo?.enabled ? (
+        <div className="demo-mode-banner">
+          DEMO MODE {appConfig?.demo?.readOnly ? "• READ ONLY" : "• EDITABLE"}
+        </div>
+      ) : null}
       {!(session.user.role === "cashier" && cashierBillingFocusMode) ? (
         <Header dashboard={dashboard} user={session.user} onLogout={logout} managerFullAccess={Boolean(state?.settings?.managerFullAccess)} />
       ) : null}

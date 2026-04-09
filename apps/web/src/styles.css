@@ -209,6 +209,20 @@ button {
   padding: 1rem;
 }
 
+.demo-mode-banner {
+  width: 100%;
+  margin: 0 0 0.7rem;
+  padding: 0.5rem 0.72rem;
+  border: 1px solid #c8a039;
+  background: #3d2f08;
+  color: #ffe7ac;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
 .auth-shell {
   min-height: 100vh;
   display: grid;
@@ -4069,6 +4083,11 @@ button:disabled {
   grid-template-columns: 0.64fr 1.35fr 0.52fr 0.78fr 0.74fr 0.97fr;
 }
 
+.stock-log-table header,
+.stock-log-table article {
+  grid-template-columns: 1.2fr 1.15fr 0.62fr 0.5fr 0.56fr 0.5fr 0.62fr 0.8fr;
+}
+
 .th-action {
   font-weight: 700;
 }
@@ -5396,6 +5415,41 @@ button:disabled {
 .loading-lorry-panel h2 {
   margin-bottom: 0.48rem;
   color: #12263f;
+}
+
+.loading-lorry-selector-panel {
+  border: 1px solid #c9d6e7;
+  border-radius: 0;
+  background: #eaf0f7;
+  box-shadow: none;
+}
+
+.loading-lorry-selector-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 0.55rem;
+}
+
+.loading-lorry-selector-card {
+  min-height: 78px;
+  border-radius: 0;
+  border: 2px solid transparent;
+  color: #f3f7ff;
+  font-size: 1.02rem;
+  font-weight: 900;
+  letter-spacing: 0.01em;
+  box-shadow: none;
+}
+
+.loading-lorry-selector-card:nth-child(1) { background: #0f2f57; }
+.loading-lorry-selector-card:nth-child(2) { background: #4b2f0e; }
+.loading-lorry-selector-card:nth-child(3) { background: #0f4a3a; }
+.loading-lorry-selector-card:nth-child(4) { background: #45203d; }
+
+.loading-lorry-selector-card.is-active {
+  border-color: #f3f7ff;
+  outline: 2px solid #1b5eb8;
+  outline-offset: 0;
 }
 
 .loading-panel-head {
@@ -8410,6 +8464,11 @@ button:disabled {
     grid-template-columns: 0.58fr 1.02fr 0.42fr 0.72fr 0.64fr 0.88fr;
   }
 
+  .stock-log-table header,
+  .stock-log-table article {
+    grid-template-columns: 1fr 1fr 0.58fr 0.42fr 0.46fr 0.42fr 0.55fr 0.66fr;
+  }
+
   .return-draft-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.42rem;
@@ -8465,6 +8524,20 @@ button:disabled {
   .loading-lorry-panel {
     border-radius: 14px;
     padding: 0.66rem;
+  }
+
+  .loading-lorry-selector-panel {
+    padding: 0.66rem;
+  }
+
+  .loading-lorry-selector-grid {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+    gap: 0.4rem;
+  }
+
+  .loading-lorry-selector-card {
+    min-height: 64px;
+    font-size: 0.9rem;
   }
 
   .loading-summary-grid {

@@ -1,12 +1,13 @@
 import "dotenv/config";
 import express from "express";
 import http from "node:http";
+import fs from "node:fs";
 import cors from "cors";
 import { Server } from "socket.io";
 import { nanoid } from "nanoid";
 import { SOCKET_EVENTS } from "@pepsi/shared";
-import { enrichSale } from "./seed.js";
-import { getState, getStoreMeta, updateState } from "./store.js";
+import { enrichSale, seedState } from "./seed.js";
+import { getState, getStoreMeta, replaceState, updateState } from "./store.js";
 import {
   createAuthUser,
   deleteAuthUser,
@@ -26,6 +27,10 @@ const BASE_LORRIES = ["Lorry A", "Lorry B"];
 const ORDER_LORRIES = ["Lorry A", "Lorry A Overflow", "Lorry B", "Lorry B Overflow"];
 const LORRY_CAPACITY = 2880;
 const BUSINESS_TIME_ZONE = "Asia/Colombo";
+const APP_MODE = String(process.env.APP_MODE || "live").trim().toLowerCase();
+const IS_DEMO_MODE = APP_MODE === "demo";
+const DEMO_READ_ONLY = String(process.env.DEMO_READ_ONLY || "false").trim().toLowerCase() === "true";
+const DEMO_SNAPSHOT_FILE = String(process.env.DEMO_SNAPSHOT_FILE || "").trim();
 const colomboDateFormatter = new Intl.DateTimeFormat("en-CA", {
   timeZone: BUSINESS_TIME_ZONE,
   year: "numeric",
@@ -312,6 +317,18 @@ const recalculateSaleFinancials = (sale) => {
   };
 };
 
+const pushStockMovement = (draft, entry) => {
+  draft.stockMovements = draft.stockMovements || [];
+  draft.stockMovements.unshift({
+    id: nanoid(12),
+    at: new Date().toISOString(),
+    ...entry
+  });
+  if (draft.stockMovements.length > 5000) {
+    draft.stockMovements = draft.stockMovements.slice(0, 5000);
+  }
+};
+
 const buildReturnLineFinancials = ({ sale, soldLine, quantity }) => {
   const qty = Number(quantity || 0);
   const soldQty = Number(soldLine?.quantity || 0);
@@ -377,6 +394,26 @@ const io = new Server(server, {
 app.use(cors({ origin: process.env.CORS_ORIGIN?.split(",") || "*" }));
 app.use(express.json());
 
+app.use((req, res, next) => {
+  if (!IS_DEMO_MODE || !DEMO_READ_ONLY) {
+    next();
+    return;
+  }
+  const method = String(req.method || "").toUpperCase();
+  if (!["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
+    next();
+    return;
+  }
+  const routePath = String(req.path || "");
+  const isAuthRoute = routePath === "/auth/login" || routePath === "/auth/refresh" || routePath === "/auth/logout";
+  const isDemoResetRoute = routePath === "/demo/reset";
+  if (isAuthRoute || isDemoResetRoute) {
+    next();
+    return;
+  }
+  res.status(403).json({ message: "Demo mode is read-only" });
+});
+
 const sendFullSync = () => {
   const state = getState();
   io.emit(SOCKET_EVENTS.STATE_SYNC, {
@@ -387,6 +424,18 @@ const sendFullSync = () => {
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, now: new Date().toISOString() });
+});
+
+app.get("/app/config", requireAuth, (_req, res) => {
+  res.json({
+    appMode: APP_MODE,
+    businessTimeZone: BUSINESS_TIME_ZONE,
+    demo: {
+      enabled: IS_DEMO_MODE,
+      readOnly: DEMO_READ_ONLY,
+      hasSnapshot: Boolean(DEMO_SNAPSHOT_FILE)
+    }
+  });
 });
 
 app.get("/db/readonly", (req, res) => {
@@ -559,6 +608,16 @@ app.post("/products", requireAuth, requireAdminOrManagerFullAccess, (req, res) =
 
   updateState((draft) => {
     draft.products.unshift(created);
+    pushStockMovement(draft, {
+      action: "create_product",
+      by: req.user?.username || "system",
+      productId: created.id,
+      sku: created.sku || "",
+      name: created.name || "",
+      beforeStock: 0,
+      changeQty: Number(created.stock || 0),
+      afterStock: Number(created.stock || 0)
+    });
     return draft;
   });
 
@@ -586,18 +645,34 @@ app.patch("/products/:id", requireAuth, requireAdminOrManagerFullAccess, (req, r
     if (index === -1) {
       return state;
     }
+    const previous = state.products[index];
+    const previousStock = Number(previous.stock || 0);
 
-    state.products[index] = {
-      ...state.products[index],
+    const updated = {
+      ...previous,
       ...patch,
-      size: patch.size !== undefined ? String(patch.size || "").trim() : state.products[index].size,
-        sku: incomingSku ?? state.products[index].sku,
-        invoicePrice: patch.invoicePrice !== undefined ? Number(patch.invoicePrice) : (state.products[index].invoicePrice ?? 0),
-        billingPrice: patch.billingPrice !== undefined ? Number(patch.billingPrice) : state.products[index].billingPrice,
-        mrp: patch.mrp !== undefined ? Number(patch.mrp) : state.products[index].mrp,
-      price: patch.price !== undefined ? Number(patch.price) : state.products[index].price,
-      stock: patch.stock !== undefined ? Number(patch.stock) : state.products[index].stock
+      size: patch.size !== undefined ? String(patch.size || "").trim() : previous.size,
+      sku: incomingSku ?? previous.sku,
+      invoicePrice: patch.invoicePrice !== undefined ? Number(patch.invoicePrice) : (previous.invoicePrice ?? 0),
+      billingPrice: patch.billingPrice !== undefined ? Number(patch.billingPrice) : previous.billingPrice,
+      mrp: patch.mrp !== undefined ? Number(patch.mrp) : previous.mrp,
+      price: patch.price !== undefined ? Number(patch.price) : previous.price,
+      stock: patch.stock !== undefined ? Number(patch.stock) : previous.stock
     };
+    state.products[index] = updated;
+    const nextStock = Number(updated.stock || 0);
+    if (Number.isFinite(previousStock) && Number.isFinite(nextStock) && previousStock !== nextStock) {
+      pushStockMovement(state, {
+        action: "update_stock",
+        by: req.user?.username || "system",
+        productId: updated.id,
+        sku: updated.sku || "",
+        name: updated.name || "",
+        beforeStock: previousStock,
+        changeQty: Number((nextStock - previousStock).toFixed(2)),
+        afterStock: nextStock
+      });
+    }
 
     return state;
   });
@@ -621,6 +696,16 @@ app.delete("/products/:id", requireAuth, requireAdminOrManagerFullAccess, (req, 
     const index = state.products.findIndex((item) => item.id === id);
     if (index === -1) return state;
     removed = state.products[index];
+    pushStockMovement(state, {
+      action: "delete_product",
+      by: req.user?.username || "system",
+      productId: removed.id,
+      sku: removed.sku || "",
+      name: removed.name || "",
+      beforeStock: Number(removed.stock || 0),
+      changeQty: Number((0 - Number(removed.stock || 0)).toFixed(2)),
+      afterStock: 0
+    });
     state.products.splice(index, 1);
     return state;
   });
@@ -1744,6 +1829,35 @@ app.get("/dashboard", requireAuth, (_req, res) => {
     todayRevenue: Number(todayRevenue.toFixed(2)),
     todayOutstanding: Number(todayOutstanding.toFixed(2)),
     lowStockItems
+  });
+});
+
+app.post("/demo/reset", requireAuth, requireRole("admin"), (_req, res) => {
+  if (!IS_DEMO_MODE) {
+    res.status(404).json({ message: "Demo reset is available only in demo mode" });
+    return;
+  }
+
+  let nextState = structuredClone(seedState);
+  if (DEMO_SNAPSHOT_FILE) {
+    try {
+      const raw = fs.readFileSync(DEMO_SNAPSHOT_FILE, "utf8");
+      nextState = JSON.parse(raw);
+    } catch (error) {
+      res.status(500).json({ message: `Unable to load demo snapshot: ${error?.message || "invalid snapshot"}` });
+      return;
+    }
+  }
+
+  const replaced = replaceState(nextState);
+  io.emit(SOCKET_EVENTS.INVENTORY_UPDATED, replaced.products || []);
+  sendFullSync();
+  res.json({
+    ok: true,
+    mode: APP_MODE,
+    source: DEMO_SNAPSHOT_FILE ? "snapshot" : "seed",
+    sales: (replaced.sales || []).length,
+    products: (replaced.products || []).length
   });
 });
 

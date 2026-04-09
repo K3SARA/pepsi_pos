@@ -29,6 +29,7 @@ const normalizeState = (parsed) => ({
   products: (parsed || {}).products || seedState.products,
   sales: (parsed || {}).sales || [],
   returns: (parsed || {}).returns || [],
+  stockMovements: (parsed || {}).stockMovements || [],
   customers: (parsed || {}).customers || [],
   staff: (parsed || {}).staff || []
 });
@@ -115,6 +116,12 @@ export const getStoreMeta = () => ({
 export const updateState = (updater) => {
   const next = updater(structuredClone(cachedState));
   cachedState = next;
+  persistState(cachedState);
+  return cachedState;
+};
+
+export const replaceState = (nextState) => {
+  cachedState = normalizeState(nextState);
   persistState(cachedState);
   return cachedState;
 };
