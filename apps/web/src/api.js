@@ -122,6 +122,7 @@ export const deleteAuthUser = (id) =>
   });
 export const fetchState = () => request("/state");
 export const fetchDashboard = () => request("/dashboard");
+export const fetchAppConfig = () => request("/app/config");
 export const submitSale = (payload) =>
   request("/sales", {
     method: "POST",
@@ -210,4 +211,9 @@ export const setManagerFullAccess = (payload) =>
   request("/settings/manager-full-access", {
     method: "POST",
     body: JSON.stringify(payload)
+  });
+
+export const resetDemoData = () =>
+  request("/demo/reset", {
+    method: "POST"
   });
