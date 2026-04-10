@@ -46,15 +46,6 @@ const toColomboDateKey = (value = new Date()) => {
   }
 };
 
-const isChequePaymentCollected = (payment, referenceDate = new Date()) => {
-  if (String(payment?.method || "").toLowerCase() !== "cheque") return true;
-  const chequeDateKey = toColomboDateKey(payment?.chequeDate);
-  if (!chequeDateKey) return true;
-  const todayKey = toColomboDateKey(referenceDate);
-  if (!todayKey) return true;
-  return chequeDateKey <= todayKey;
-};
-
 const buildLorryLoadMap = (state) => {
   const next = ORDER_LORRIES.reduce((acc, name) => {
     acc[name] = 0;
@@ -284,10 +275,7 @@ const recalculateSaleFinancials = (sale) => {
   const payments = normalizeSalePayments(sale);
   const cashPayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cash");
   const chequePayments = payments.filter((payment) => String(payment.method || "").toLowerCase() === "cheque");
-  const allPaidPayments = payments.filter((payment) => {
-    if (!(Number(payment.amount || 0) > 0)) return false;
-    return isChequePaymentCollected(payment);
-  });
+  const allPaidPayments = payments.filter((payment) => Number(payment.amount || 0) > 0);
   const totalCash = totalPaymentsAmount(cashPayments);
   const totalCheque = totalPaymentsAmount(chequePayments);
   const latestCheque = chequePayments.length ? chequePayments[chequePayments.length - 1] : null;
